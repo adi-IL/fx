@@ -513,8 +513,6 @@ test "processQueuedPrompt gates text-only images through the real Vision runtime
 
     try runFakePrompt(&gateway, &hooks, config, job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqualStrings("zai/glm-5.2", hooks.capability_queries.items[0]);
     try std.testing.expectEqual(@as(usize, 3), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("zai/glm-5.2", gateway.request_models.items[0]);
     try std.testing.expectEqualStrings("google/gemini-2.5-flash", gateway.request_models.items[1]);
@@ -1472,7 +1470,6 @@ test "processQueuedPrompt preserves configured first choice for first unrestrict
 
     try runFakePrompt(&gateway, &hooks, config, job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
     try std.testing.expectEqual(@as(usize, 3), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("zai/glm-5.2", gateway.request_models.items[0]);
     try std.testing.expectEqualStrings("google/gemini-2.5-flash", gateway.request_models.items[1]);
@@ -1582,7 +1579,6 @@ test "processQueuedPrompt rereads historical authorized image through optional V
 
     try runFakePrompt(&gateway, &hooks, config, job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
     try std.testing.expectEqual(@as(usize, 3), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("zai/glm-5.2", gateway.request_models.items[0]);
     try std.testing.expectEqualStrings("google/gemini-2.5-flash", gateway.request_models.items[1]);
@@ -1671,8 +1667,6 @@ test "processQueuedPrompt reports exact Vision outage tip and permits normal rec
     job.authorized_image_catalog = &images;
 
     try runFakePrompt(&gateway, &hooks, config, job);
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqualStrings("zai/glm-5.2", hooks.capability_queries.items[0]);
     try std.testing.expectEqual(@as(usize, 3), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("zai/glm-5.2", gateway.request_models.items[0]);
     try std.testing.expectEqualStrings("google/gemini-2.5-flash", gateway.request_models.items[1]);
@@ -2234,19 +2228,19 @@ test "processQueuedPrompt keeps native image parts for vision route model" {
         },
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("google/gemini-2.5-flash"));
+    job.route = test_support.testRouteForCapabilities(
+        "google/gemini-2.5-flash",
+        capability_overrides[0].capabilities,
+    );
     job.prompt = @constCast("Describe the attached image.");
     job.images = &images;
     job.authorized_image_catalog = &images;
 
     try runFakePrompt(&gateway, &hooks, fixture.config(), job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqualStrings("google/gemini-2.5-flash", hooks.capability_queries.items[0]);
     try std.testing.expectEqual(@as(usize, 1), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("google/gemini-2.5-flash", gateway.request_models.items[0]);
     try expectBodyContains(&gateway, 0, "\"type\":\"file\"");
@@ -2307,7 +2301,6 @@ test "processQueuedPrompt routes images natively only when vision and file input
         var gateway = FakeGateway.init(alloc, completions);
         defer gateway.deinit();
         var hooks = FakeAgentRuntimeDeps.init(alloc);
-        hooks.capability_overrides = &capability_overrides;
         hooks.tool_registry = .{ .tools = test_support.vision_agent_test_tools[0..] };
         defer hooks.deinit();
         var vision_runtime = VisionAgentToolRuntime{ .alloc = alloc };
@@ -2315,15 +2308,16 @@ test "processQueuedPrompt routes images natively only when vision and file input
         hooks.execute_delegate = vision_runtime.delegate();
         var fixture = PromptFixture{};
         var job = fixture.job();
-        job.route = test_support.testRouteForModel(model);
+        job.route = test_support.testRouteForCapabilities(
+            model,
+            capability_overrides[0].capabilities,
+        );
         job.prompt = @constCast("Describe the attached image.");
         job.images = &images;
         job.authorized_image_catalog = &images;
 
         try runFakePrompt(&gateway, &hooks, fixture.config(), job);
 
-        try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-        try std.testing.expectEqualStrings(model, hooks.capability_queries.items[0]);
         if (entry.expect_native) {
             try std.testing.expectEqual(@as(usize, 1), gateway.request_bodies.items.len);
             try expectBodyContains(&gateway, 0, "\"type\":\"file\"");
@@ -2379,7 +2373,6 @@ test "processQueuedPrompt rejects native-route attachment ID Vision calls before
         },
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     hooks.tool_registry = .{ .tools = test_support.vision_agent_test_tools[0..] };
     defer hooks.deinit();
     var vision_runtime = VisionAgentToolRuntime{ .alloc = alloc };
@@ -2387,7 +2380,10 @@ test "processQueuedPrompt rejects native-route attachment ID Vision calls before
     hooks.execute_delegate = vision_runtime.delegate();
     var fixture = PromptFixture{};
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("native/test-vision"));
+    job.route = test_support.testRouteForCapabilities(
+        "native/test-vision",
+        capability_overrides[0].capabilities,
+    );
     job.prompt = @constCast("Describe the attached image.");
     job.images = &images;
     job.authorized_image_catalog = &images;
@@ -2501,14 +2497,16 @@ test "processQueuedPrompt traces selected live controls without request payloads
         }),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.fast_mode = true;
     config.effort = types.ReasoningEffort.literal("max");
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("openai/gpt-5.6-sol"));
+    job.route = test_support.testRouteForCapabilities(
+        "openai/gpt-5.6-sol",
+        capability_overrides[0].capabilities,
+    );
 
     try runFakePrompt(&gateway, &hooks, config, job);
     debug_trace.shutdown();
@@ -2540,16 +2538,19 @@ test "processQueuedPrompt omits Fast without catalog support" {
         }),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.fast_mode = true;
     config.effort = types.ReasoningEffort.literal("high");
 
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+    var job = fixture.job();
+    job.route = test_support.testRouteForCapabilities(
+        "anthropic/claude-opus-4.6",
+        capability_overrides[0].capabilities,
+    );
+    try runFakePrompt(&gateway, &hooks, config, job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
     try std.testing.expectEqual(@as(usize, 1), gateway.request_bodies.items.len);
     try expectBodyContains(&gateway, 0, "\"reasoning\":\"high\"");
     try expectRootFieldAbsent(&gateway, 0, "fast");
@@ -2588,15 +2589,17 @@ test "processQueuedPrompt uses one admitted capability snapshot for history and 
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.available_capability_overrides = &available_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var job = fixture.job();
+    job.route = test_support.testRouteForCapabilities(
+        "anthropic/claude-opus-4.6",
+        available_overrides[0].capabilities,
+    );
     job.history = &history;
 
     try runFakePrompt(&gateway, &hooks, fixture.config(), job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
     try expectBodyContains(&gateway, 0, "NEW_HISTORY_USER");
     try expectBodyContains(&gateway, 0, "NEW_HISTORY_ASSISTANT");
     try expectBodyNotContains(&gateway, 0, old_marker);
@@ -2645,7 +2648,7 @@ test "processQueuedPrompt projects bounded output limits into gateway requests" 
     }
 }
 
-test "processQueuedPrompt resolves catalog capabilities for opaque effort" {
+test "processQueuedPrompt uses admitted catalog capabilities for opaque effort" {
     const alloc = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2670,19 +2673,19 @@ test "processQueuedPrompt resolves catalog capabilities for opaque effort" {
         ),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.effort = types.ReasoningEffort.literal("future-tier");
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("provider/new-reasoning-model"));
+    job.route = test_support.testRouteForCapabilities(
+        "provider/new-reasoning-model",
+        capability_overrides[0].capabilities,
+    );
 
     try runFakePrompt(&gateway, &hooks, config, job);
     debug_trace.shutdown();
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqualStrings("provider/new-reasoning-model", hooks.capability_queries.items[0]);
     try expectBodyContains(&gateway, 0, "\"reasoning\":\"future-tier\"");
     try expectBodyNotContains(&gateway, 0, "\"providerOptions\"");
 
@@ -2728,54 +2731,18 @@ test "processQueuedPrompt traces why stale controls are omitted" {
     try std.testing.expect(std.mem.find(u8, trace, "fast=unsupported_or_missing") != null);
 }
 
-test "processQueuedPrompt persists interruption when capability resolution returns cancellation" {
+test "processQueuedPrompt does not dispatch a cancelled admitted route" {
     const alloc = std.testing.allocator;
     const completions = [_]FakeCompletion{.{ .content = "must not run" }};
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
     var fixture = PromptFixture{};
+    fixture.cancel_flag.store(true, .seq_cst);
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.cancel_on_capability_resolution = &fixture.cancel_flag;
     defer hooks.deinit();
-    var config = fixture.config();
-    config.effort = types.ReasoningEffort.literal("high");
-    var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("provider/new-reasoning-model"));
 
-    try runFakePrompt(&gateway, &hooks, config, job);
+    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqual(@as(usize, 0), gateway.request_models.items.len);
-    try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_history_count);
-    try std.testing.expectEqual(@as(usize, 1), hooks.finalization_count);
-    try std.testing.expectEqual(types.TurnPresentationOutcome.interrupted, hooks.finalized_outcome.?);
-}
-
-test "processQueuedPrompt does not dispatch when cancellation follows capability resolution" {
-    const alloc = std.testing.allocator;
-    const completions = [_]FakeCompletion{.{ .content = "must not run" }};
-    var gateway = FakeGateway.init(alloc, &completions);
-    defer gateway.deinit();
-    const capability_overrides = [_]ModelCapabilityOverride{.{
-        .model = "provider/new-reasoning-model",
-        .capabilities = model_capabilities.resolveCapabilities(
-            "provider/new-reasoning-model",
-            .{ .supports_reasoning = true },
-        ),
-    }};
-    var fixture = PromptFixture{};
-    var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
-    hooks.cancel_after_capability_resolution = &fixture.cancel_flag;
-    defer hooks.deinit();
-    var config = fixture.config();
-    config.effort = types.ReasoningEffort.literal("high");
-    var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("provider/new-reasoning-model"));
-
-    try runFakePrompt(&gateway, &hooks, config, job);
-
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
     try std.testing.expectEqual(@as(usize, 0), gateway.request_models.items.len);
     try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_history_count);
     try std.testing.expectEqual(@as(usize, 1), hooks.finalization_count);
@@ -2792,13 +2759,15 @@ test "processQueuedPrompt keeps exact model identity and emits Gateway Fast" {
         .capabilities = model_capabilities.resolveCapabilities("zai/glm-5.2", .{ .supports_fast_mode = true }),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.fast_mode = true;
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("zai/glm-5.2"));
+    job.route = test_support.testRouteForCapabilities(
+        "zai/glm-5.2",
+        capability_overrides[0].capabilities,
+    );
 
     try runFakePrompt(&gateway, &hooks, config, job);
 
@@ -2822,18 +2791,18 @@ test "processQueuedPrompt keeps directly selected fast model identity for portab
         ),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.effort = types.ReasoningEffort.literal("high");
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("zai/glm-5.2-fast"));
+    job.route = test_support.testRouteForCapabilities(
+        "zai/glm-5.2-fast",
+        capability_overrides[0].capabilities,
+    );
 
     try runFakePrompt(&gateway, &hooks, config, job);
 
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqualStrings("zai/glm-5.2-fast", hooks.capability_queries.items[0]);
     try std.testing.expectEqualStrings("zai/glm-5.2-fast", gateway.request_models.items[0]);
 }
 
@@ -2854,13 +2823,15 @@ test "processQueuedPrompt filters stale controls against each queued model" {
             }),
         }};
         var hooks = FakeAgentRuntimeDeps.init(alloc);
-        hooks.capability_overrides = &overrides;
         defer hooks.deinit();
         var config = fixture.config();
         config.fast_mode = true;
         config.effort = types.ReasoningEffort.literal("xhigh");
         var job = fixture.job();
-        job.route = test_support.testRouteForModel(@constCast("anthropic/claude-opus-4.8"));
+        job.route = test_support.testRouteForCapabilities(
+            "anthropic/claude-opus-4.8",
+            overrides[0].capabilities,
+        );
 
         try runFakePrompt(&gateway, &hooks, config, job);
 
@@ -2921,10 +2892,14 @@ test "processQueuedPrompt filters captured Fast by model capability" {
             .capabilities = model_capabilities.resolveCapabilities("anthropic/claude-opus-4.6", .{ .supports_fast_mode = true }),
         }};
         var hooks = FakeAgentRuntimeDeps.init(alloc);
-        hooks.capability_overrides = &overrides;
         defer hooks.deinit();
 
-        try runFakePrompt(&gateway, &hooks, config, fixture.job());
+        var job = fixture.job();
+        job.route = test_support.testRouteForCapabilities(
+            "anthropic/claude-opus-4.6",
+            overrides[0].capabilities,
+        );
+        try runFakePrompt(&gateway, &hooks, config, job);
 
         try std.testing.expectEqual(@as(usize, 1), gateway.request_bodies.items.len);
         try expectRootFieldAbsent(&gateway, 0, "fast");
@@ -2952,6 +2927,7 @@ test "selecting connection B during route A changes only the next admitted turn"
             connection_id: []const u8,
             endpoint: []const u8,
             credential_ref: []const u8,
+            credential: []const u8,
             model_id: []const u8,
         ) !void {
             try std.testing.expectEqualStrings(connection_id, request.route.connection_id);
@@ -2959,6 +2935,7 @@ test "selecting connection B during route A changes only the next admitted turn"
             try std.testing.expectEqualStrings("fake-protocol", request.route.protocol);
             try std.testing.expectEqualStrings(endpoint, request.route.endpoint);
             try std.testing.expectEqualStrings(credential_ref, request.route.credential_ref);
+            try std.testing.expectEqualStrings(credential, request.credential);
             try std.testing.expectEqualStrings(model_id, request.model_id);
         }
 
@@ -2972,7 +2949,7 @@ test "selecting connection B during route A changes only the next admitted turn"
             self.calls += 1;
             switch (self.calls) {
                 1 => {
-                    try expectRoute(request, "connection-a", "fake://a", "fake-ref-a", "fake/model-a");
+                    try expectRoute(request, "connection-a", "fake://a", "fake-ref-a", "secret-a", "fake/model-a");
                     self.route_a_address = @intFromPtr(request.route);
                     try std.testing.expect(try self.registry.select("connection-b"));
                     try events.emit(.{ .fx_tool_call = toolCall(
@@ -2983,14 +2960,14 @@ test "selecting connection B during route A changes only the next admitted turn"
                     try events.emit(.{ .finish = .{ .reason = .tool_calls } });
                 },
                 2 => {
-                    try expectRoute(request, "connection-a", "fake://a", "fake-ref-a", "fake/model-a");
+                    try expectRoute(request, "connection-a", "fake://a", "fake-ref-a", "secret-a", "fake/model-a");
                     try std.testing.expectEqual(self.route_a_address.?, @intFromPtr(request.route));
                     try std.testing.expectEqualStrings("connection-b", self.registry.selectedProfile().id);
                     try events.emit(.{ .text_delta = "done-a" });
                     try events.emit(.{ .finish = .{ .reason = .stop } });
                 },
                 3 => {
-                    try expectRoute(request, "connection-b", "fake://b", "fake-ref-b", "fake/model-b");
+                    try expectRoute(request, "connection-b", "fake://b", "fake-ref-b", "secret-b", "fake/model-b");
                     try events.emit(.{ .text_delta = "done-b" });
                     try events.emit(.{ .finish = .{ .reason = .stop } });
                 },
@@ -3038,6 +3015,10 @@ test "selecting connection B during route A changes only the next admitted turn"
     var job_a = fixture.job();
     job_a.route = route_a;
     var hooks_a = FakeAgentRuntimeDeps.init(alloc);
+    hooks_a.route_credential_overrides = &.{
+        .{ .credential_ref = "fake-ref-a", .credential = "secret-a" },
+        .{ .credential_ref = "fake-ref-b", .credential = "secret-b" },
+    };
     hooks_a.permission_decisions = &.{.once};
     hooks_a.exec_plans = &.{.{ .result = .{ .model_output = "file contents" } }};
     defer hooks_a.deinit();
@@ -3067,6 +3048,7 @@ test "selecting connection B during route A changes only the next admitted turn"
     job_b.prompt = @constCast("next turn");
     job_b.route = route_b;
     var hooks_b = FakeAgentRuntimeDeps.init(alloc);
+    hooks_b.route_credential_overrides = hooks_a.route_credential_overrides;
     defer hooks_b.deinit();
     var deps_b = hooks_b.deps();
     deps_b.provider_adapter = adapter;
@@ -4098,14 +4080,18 @@ test "processQueuedPrompt disables provider option fast after a replay safe SSE 
         .capabilities = model_capabilities.resolveCapabilities("anthropic/claude-opus-4.6", .{ .supports_fast_mode = true }),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.fast_mode = true;
     config.max_provider_attempts = 2;
 
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+    var job = fixture.job();
+    job.route = test_support.testRouteForCapabilities(
+        "anthropic/claude-opus-4.6",
+        overrides[0].capabilities,
+    );
+    try runFakePrompt(&gateway, &hooks, config, job);
 
     try std.testing.expectEqual(@as(usize, 2), gateway.request_models.items.len);
     try expectBodyContains(&gateway, 0, "\"providerOptions\":{\"gateway\":{\"speed\":\"fast\"}}");
@@ -4126,14 +4112,18 @@ test "processQueuedPrompt disables provider option fast after a replay safe HTTP
         .capabilities = model_capabilities.resolveCapabilities("anthropic/claude-opus-4.6", .{ .supports_fast_mode = true }),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
     config.fast_mode = true;
     config.max_provider_attempts = 2;
 
-    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+    var job = fixture.job();
+    job.route = test_support.testRouteForCapabilities(
+        "anthropic/claude-opus-4.6",
+        overrides[0].capabilities,
+    );
+    try runFakePrompt(&gateway, &hooks, config, job);
 
     try std.testing.expectEqual(@as(usize, 2), gateway.request_models.items.len);
     try expectBodyContains(&gateway, 0, "\"providerOptions\":{\"gateway\":{\"speed\":\"fast\"}}");
@@ -5346,7 +5336,6 @@ test "processQueuedPrompt disable Fast recovery retries the same exact model" {
         ),
     }};
     var hooks = FakeAgentRuntimeDeps.init(alloc);
-    hooks.capability_overrides = &capability_overrides;
     defer hooks.deinit();
     var fixture = PromptFixture{};
     var config = fixture.config();
@@ -5355,7 +5344,10 @@ test "processQueuedPrompt disable Fast recovery retries the same exact model" {
     config.gateway_retry_count = 1;
     config.max_provider_attempts = 2;
     var job = fixture.job();
-    job.route = test_support.testRouteForModel(@constCast("zai/glm-5.2"));
+    job.route = test_support.testRouteForCapabilities(
+        "zai/glm-5.2",
+        capability_overrides[0].capabilities,
+    );
 
     try runFakePrompt(&gateway, &hooks, config, job);
 
@@ -5365,8 +5357,6 @@ test "processQueuedPrompt disable Fast recovery retries the same exact model" {
     try expectBodyContains(&gateway, 0, "\"providerOptions\":{\"gateway\":{\"speed\":\"fast\"}}");
     try expectRootFieldAbsent(&gateway, 0, "fast");
     try expectRootFieldAbsent(&gateway, 1, "providerOptions");
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
-    try std.testing.expectEqualStrings("zai/glm-5.2", hooks.capability_queries.items[0]);
     try std.testing.expectEqual(@as(usize, 0), hooks.route_recovery_count);
     try std.testing.expectEqual(@as(usize, 1), countText(&hooks, "Recovered without Fast"));
     try std.testing.expectEqual(@as(usize, 0), hooks.system_notices.items.len);
