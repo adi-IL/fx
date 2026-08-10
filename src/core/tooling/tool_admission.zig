@@ -8,6 +8,7 @@ const command_environment = @import("../execution/command_environment.zig");
 const command_effect = @import("../shell_command/command_effect.zig");
 const file_mutation = @import("file_mutation.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
+const gateway_schema = @import("gateway_schema.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const io_mod = @import("../shared/io.zig");
 const text_utils = @import("../shared/text_utils.zig");
@@ -742,21 +743,27 @@ fn schemaForReview(
     call: ToolCall,
     is_dynamic_tool: bool,
 ) !?[]const u8 {
-    if (!is_dynamic_tool) return null;
-    const context = input.mcp_runtime.context orelse return null;
-    const tool_schema = input.mcp_runtime.tool_schema orelse return null;
-    const result = (try tool_schema(
-        context,
+    if (is_dynamic_tool) {
+        const context = input.mcp_runtime.context orelse return null;
+        const tool_schema = input.mcp_runtime.tool_schema orelse return null;
+        const result = (try tool_schema(
+            context,
+            arena,
+            call.name,
+            input.permission_rules,
+            input.context_limits,
+            input.mcp_runtime.access,
+        )) orelse return null;
+        return switch (result) {
+            .selected => |payload| payload.model_output,
+            .rejected => null,
+        };
+    }
+    const tool = registeredTool(input, call.name) orelse return null;
+    return try gateway_schema.builtinFunctionSchemaJsonAlloc(
         arena,
-        call.name,
-        input.permission_rules,
-        input.context_limits,
-        input.mcp_runtime.access,
-    )) orelse return null;
-    return switch (result) {
-        .selected => |payload| payload.model_output,
-        .rejected => null,
-    };
+        tool.gateway_schema,
+    );
 }
 
 fn reviewRequestForCall(
