@@ -935,7 +935,9 @@ fn runAutomaticReview(
             "event=auto_review_result tool_name={s} decision=cancelled_or_error fallback_reason={s} elapsed_ms={d} execution_started=false call_id={s}",
             .{ call.name, @errorName(err), io_mod.milliTimestamp() - started_ms, call.id },
         );
-        return err;
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        if (err == error.Cancelled) return error.Cancelled;
+        return .invalid;
     };
     switch (review) {
         .valid => |result| debug_trace.logf(
@@ -5225,9 +5227,101 @@ test "human approval phase bypasses automatic review" {
         &.{},
     );
     try std.testing.expectEqual(ToolPermissionDecision.permission_required, headless.decision);
-    try std.testing.expectEqual(types.ToolPermissionDenialReason.permission_required, headless.denial_reason.?);
+    try std.testing.expectEqual(
+        types.ToolPermissionDenialReason.permission_required,
+        headless.denial_reason.?,
+    );
     try std.testing.expectEqual(@as(usize, 0), fake.calls);
     try std.testing.expectEqual(@as(usize, 1), recording.calls);
+}
+
+test "cancelled automatic review remains absorbing with a prompter" {
+    const CancelledReviewer = struct {
+        calls: usize = 0,
+
+        fn classify(
+            raw_ctx: *anyopaque,
+            _: Allocator,
+            _: permission_auto_classifier.ReviewRequest,
+        ) anyerror!permission_auto_classifier.ParseOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
+            self.calls += 1;
+            return error.Cancelled;
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var reviewer = CancelledReviewer{};
+    var recording = RecordingPrompter{};
+    var input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&reviewer),
+            CancelledReviewer.classify,
+        ),
+    );
+    input.permission_prompter = recording.prompter();
+
+    try std.testing.expectError(error.Cancelled, requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "cancelled-review",
+            .name = "run_command",
+            .arguments_json = "{\"command\":\"touch cancelled-review.txt\"}",
+        },
+        .auto,
+        &.{},
+    ));
+
+    try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
+    try std.testing.expectEqual(@as(usize, 0), recording.calls);
+}
+
+test "cancelled automatic review remains absorbing without a prompter" {
+    const CancelledReviewer = struct {
+        fn classify(
+            _: *anyopaque,
+            _: Allocator,
+            _: permission_auto_classifier.ReviewRequest,
+        ) anyerror!permission_auto_classifier.ParseOutcome {
+            return error.Cancelled;
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var reviewer: u8 = 0;
+    const input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&reviewer),
+            CancelledReviewer.classify,
+        ),
+    );
+
+    try std.testing.expectError(error.Cancelled, requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "cancelled-review-headless",
+            .name = "run_command",
+            .arguments_json = "{\"command\":\"touch cancelled-review-headless.txt\"}",
+        },
+        .auto,
+        &.{},
+    ));
 }
 
 test "configured command authority skips automatic review" {

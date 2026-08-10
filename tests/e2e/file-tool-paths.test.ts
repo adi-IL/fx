@@ -1007,13 +1007,10 @@ describe("filesystem path handling", () => {
         expect(result.stderr).not.toContain("Auto agent approved this request");
         expect(readFileSync(target, "utf8")).toBe("before\n");
         const trace = readFileSync(tracePath, "utf8");
-        expect(trace).toContain(
-          "event=auto_review_compose_result result=ready",
-        );
-        expect(trace).toContain("event=auto_review_transport_start");
-        expect(trace).toContain(
-          "event=auto_review_result tool_name=write_file decision=ask",
-        );
+        expect(trace).toContain("event=auto_review_compose_result result=ready");
+        expect(trace).toContain("event=auto_review_send attempt=1");
+        expect(trace).not.toContain("event=auto_review_transport_start");
+        expect(trace).toContain("fallback_reason=invalid_or_unavailable");
       } finally {
         gateway.stop();
         rmSync(root.root, { recursive: true, force: true });
