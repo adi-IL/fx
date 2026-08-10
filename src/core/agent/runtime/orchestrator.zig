@@ -1106,10 +1106,20 @@ fn restoredRecoveryStrategy(
         .proven_unexecuted => .regenerate_tool,
         .confirmed => .continue_after_confirmed_tool,
         .uncertain => .reconcile_tool,
-        .none => if (checkpoint.assistant_source.len > 0)
-            .continue_response
-        else
-            .retry_request,
+        .none => switch (checkpoint.action) {
+            .retrying_request => .retry_request,
+            .continuing_response => .continue_response,
+            .regenerating_tool => .regenerate_tool,
+            .continuing_after_tool => .continue_after_confirmed_tool,
+            .reconciling_tool => .reconcile_tool,
+            .waiting_for_connectivity => .wait_for_connectivity,
+            .paused => if (checkpoint.delivery == .definitely_unsent)
+                .retry_request
+            else if (checkpoint.assistant_source.len > 0)
+                .continue_response
+            else
+                .retry_request,
+        },
     };
 }
 
@@ -1126,10 +1136,20 @@ fn restoredConsumedAttempts(
 fn recoverySelectionChanged(
     checkpoint: session_codec.RecoveryCheckpoint,
     route: *const route_snapshot.RouteSnapshot,
-    selected_fast_mode: bool,
 ) bool {
-    return !route.containsModel(checkpoint.route_model) or
-        checkpoint.requested_fast_mode != selected_fast_mode;
+    const identity = checkpoint.route_identity orelse return true;
+    return !std.mem.eql(u8, route.connection_id, identity.connection_id) or
+        !std.mem.eql(u8, route.adapter_kind, identity.adapter_kind) or
+        !std.mem.eql(u8, route.primary_model_id, checkpoint.route_model) or
+        !optionalStringsEqual(
+            route.permission_review_model_id,
+            identity.permission_review_model_id,
+        );
+}
+
+fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
 }
 
 fn checkpointCause(
@@ -1212,6 +1232,7 @@ fn persistRecoveryCheckpoint(
     attempt_limit: usize,
     consumed_attempts: usize,
     outstanding_reservation: bool,
+    delivery: session_codec.RecoveryDelivery,
     cause: model_response_recovery.FailureCause,
     strategy: ?model_response_recovery.Strategy,
     tool_evidence: model_response_recovery.ToolEvidence,
@@ -1223,6 +1244,16 @@ fn persistRecoveryCheckpoint(
         current_turn_messages,
     );
     try effect.set(deps.ctx, .{
+        .version = 2,
+        .route_identity = .{
+            .connection_id = @constCast(job.route.connection_id),
+            .adapter_kind = @constCast(job.route.adapter_kind),
+            .permission_review_model_id = if (job.route.permission_review_model_id) |model|
+                @constCast(model)
+            else
+                null,
+        },
+        .delivery = delivery,
         .turn_id = job.turn_id,
         .user = .{
             .text = @constCast(job.prompt),
@@ -2537,12 +2568,14 @@ fn processQueuedPromptLoop(
         restoredConsumedAttempts(checkpoint)
     else
         0;
-    const selected_fast_mode = config.fast_mode;
+    const selected_fast_mode = if (job.recovery_checkpoint) |checkpoint|
+        checkpoint.requested_fast_mode
+    else
+        config.fast_mode or request_descriptor.selected_fast_mode;
     const selection_changed = if (job.recovery_checkpoint) |checkpoint|
         recoverySelectionChanged(
             checkpoint,
             &job.route,
-            selected_fast_mode,
         )
     else
         false;
@@ -2580,6 +2613,10 @@ fn processQueuedPromptLoop(
         restoredRecoveryToolEvidence(checkpoint.tool_state)
     else
         .none;
+    var recovery_delivery: session_codec.RecoveryDelivery = if (job.recovery_checkpoint) |checkpoint|
+        checkpoint.delivery
+    else
+        .definitely_unsent;
     var restore_recovery_source = job.recovery_checkpoint != null;
     var step: usize = 0;
     while (agent_steps.allowsStep(config.agent_step_limit, step)) : (step += 1) {
@@ -2708,6 +2745,7 @@ fn processQueuedPromptLoop(
                     semantic_limit,
                     semantic_attempt,
                     false,
+                    recovery_delivery,
                     recovery_cause,
                     recovery_strategy,
                     preserved_tool_evidence,
@@ -2744,6 +2782,7 @@ fn processQueuedPromptLoop(
                     semantic_limit,
                     semantic_attempt,
                     false,
+                    recovery_delivery,
                     recovery_cause,
                     recovery_strategy,
                     preserved_tool_evidence,
@@ -2850,6 +2889,11 @@ fn processQueuedPromptLoop(
             runtime_assistant_stream.pushTokenProgressUpdate(&stream_ctx, .changed) catch |progress_err| {
                 debug_trace.logf("agent", "token progress publication failed source=gateway_prepare err={s}", .{@errorName(progress_err)});
             };
+            stream_ctx.vision_route = vision_route;
+
+            // The reservation is durable before the send. A crash after this
+            // point cannot prove that the provider received nothing.
+            recovery_delivery = .possibly_sent;
             try persistRecoveryCheckpoint(
                 deps,
                 arena,
@@ -2862,6 +2906,7 @@ fn processQueuedPromptLoop(
                 semantic_limit,
                 semantic_attempt,
                 true,
+                recovery_delivery,
                 recovery_cause,
                 recovery_strategy,
                 effectiveRecoveryToolEvidence(
@@ -2912,9 +2957,17 @@ fn processQueuedPromptLoop(
                     debug_trace.logf("agent", "token progress publication failed source=gateway_error err={s}", .{@errorName(progress_err)});
                 };
                 const cancel_requested = config.cancel_flag.load(.seq_cst);
+                const network_failure = gateway_attempt_evidence.network_failure;
+                const delivery_state = if (network_failure) |evidence|
+                    evidence.delivery
+                else
+                    gateway_delivery.load();
+                recovery_delivery = if (delivery_state == .possibly_sent)
+                    .possibly_sent
+                else
+                    .definitely_unsent;
                 const consumed_attempts = semantic_attempt +
                     @as(usize, @intFromBool(gateway_attempt_evidence.provider_admitted));
-                const network_failure = gateway_attempt_evidence.network_failure;
                 const failure_cause: model_response_recovery.FailureCause = if (network_failure) |evidence|
                     switch (evidence.cause) {
                         .transport_interrupted => .transport_interrupted,
@@ -2941,6 +2994,7 @@ fn processQueuedPromptLoop(
                         semantic_limit,
                         consumed_attempts,
                         false,
+                        recovery_delivery,
                         failure_cause,
                         .pause,
                         effectiveRecoveryToolEvidence(
@@ -3037,6 +3091,7 @@ fn processQueuedPromptLoop(
                     semantic_limit,
                     consumed_attempts,
                     false,
+                    recovery_delivery,
                     failure_cause,
                     recovery_decision.strategy,
                     effectiveRecoveryToolEvidence(
@@ -3078,6 +3133,7 @@ fn processQueuedPromptLoop(
                         semantic_limit,
                         consumed_attempts,
                         false,
+                        recovery_delivery,
                         failure_cause,
                         .pause,
                         effectiveRecoveryToolEvidence(
@@ -3222,6 +3278,10 @@ fn processQueuedPromptLoop(
                 overlay_arena,
                 gateway_delivery.load(),
             );
+            recovery_delivery = if (gateway_delivery.load() == .possibly_sent)
+                .possibly_sent
+            else
+                .definitely_unsent;
             stream_result_set = true;
             if (recovery_strategy == .reconcile_tool and
                 stream_result.status == .ok and
@@ -3251,6 +3311,7 @@ fn processQueuedPromptLoop(
                     semantic_limit,
                     semantic_attempt + 1,
                     false,
+                    recovery_delivery,
                     recovery_cause,
                     .pause,
                     .uncertain,
@@ -3307,6 +3368,7 @@ fn processQueuedPromptLoop(
                 semantic_limit,
                 settled_attempts,
                 false,
+                recovery_delivery,
                 recovery_cause,
                 recovery_strategy,
                 effectiveRecoveryToolEvidence(
@@ -3427,6 +3489,7 @@ fn processQueuedPromptLoop(
                         semantic_limit,
                         semantic_attempt + 1,
                         false,
+                        recovery_delivery,
                         cause,
                         .pause,
                         effectiveRecoveryToolEvidence(
@@ -3467,6 +3530,7 @@ fn processQueuedPromptLoop(
                             semantic_limit,
                             semantic_attempt + 1,
                             false,
+                            recovery_delivery,
                             cause,
                             decision.strategy,
                             effectiveRecoveryToolEvidence(
@@ -3624,6 +3688,7 @@ fn processQueuedPromptLoop(
                         semantic_limit,
                         semantic_attempt + 1,
                         false,
+                        recovery_delivery,
                         cause,
                         .pause,
                         effectiveRecoveryToolEvidence(
@@ -3663,6 +3728,7 @@ fn processQueuedPromptLoop(
                             semantic_limit,
                             semantic_attempt + 1,
                             false,
+                            recovery_delivery,
                             cause,
                             decision.strategy,
                             effectiveRecoveryToolEvidence(
