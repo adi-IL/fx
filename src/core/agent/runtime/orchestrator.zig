@@ -1853,7 +1853,7 @@ fn processQueuedPromptInner(
         arena,
         &history_messages,
         job.history,
-        .{ .max_tokens = runtime_prompt_context.historyContextBudgetTokensForCapabilities(request_capabilities) },
+        .{ .max_tokens = runtime_prompt_context.historyContextBudgetTokensForCapabilities(request_descriptor.capabilities) },
     );
     const projected_roles = try runtime_telemetry.formatMessageRoles(arena, history_messages.items);
     debug_trace.eventf(
@@ -1876,7 +1876,7 @@ fn processQueuedPromptInner(
         lifecycle,
         config,
         job,
-        request_capabilities,
+        request_descriptor.capabilities,
         finalization,
         arena,
         turn_id,
@@ -3392,7 +3392,7 @@ fn processQueuedPromptLoop(
                 const route_changed = disableFastRouteAfterFailure(
                     &route_fast_mode,
                     &gateway_model,
-                    job.model,
+                    job.route.primary_model_id,
                     cause,
                     streamReplaySafe(&stream_ctx),
                     step_ctx,
@@ -3603,7 +3603,7 @@ fn processQueuedPromptLoop(
                 const route_changed = disableFastRouteAfterFailure(
                     &route_fast_mode,
                     &gateway_model,
-                    job.model,
+                    job.route.primary_model_id,
                     cause,
                     providerFailureReplaySafe(attempt_completion, &stream_ctx),
                     step_ctx,
@@ -3842,7 +3842,7 @@ fn processQueuedPromptLoop(
                 stream_result.status,
                 clipped,
                 job.route.primary_model_id,
-                request_descriptor.capabilities,
+                request_capabilities,
             );
             try deps.push_http_error(deps.ctx, stream_result.status, http_detail, route_credential.legacy_source);
             if (stop_state.retained_candidate != null) {
