@@ -1971,6 +1971,23 @@ fn prepareExternalFailureDiagnostic(
         null;
     defer if (owned_source) |source| alloc.free(source);
     const source = owned_source orelse if (trimmed.len > 0) trimmed else fallback;
+    return sanitizeFailureDiagnostic(alloc, source, fallback);
+}
+
+fn prepareNormalizedFailureDiagnostic(
+    alloc: Allocator,
+    raw: []const u8,
+    fallback: []const u8,
+) !types.ModelFailureDiagnostic {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return sanitizeFailureDiagnostic(alloc, if (trimmed.len > 0) trimmed else fallback, fallback);
+}
+
+fn sanitizeFailureDiagnostic(
+    alloc: Allocator,
+    source: []const u8,
+    fallback: []const u8,
+) !types.ModelFailureDiagnostic {
     const masked = try text_utils.maskSecrets(alloc, source);
     defer if (masked.ptr != source.ptr) alloc.free(masked);
 
