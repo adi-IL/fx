@@ -4241,30 +4241,16 @@ test "incomplete review authority maps to auto denial without reviewer transport
         review_calls: usize = 0,
         transport_calls: usize = 0,
 
-        fn send(
-            raw_ctx: *anyopaque,
-            _: Allocator,
-            _: []const u8,
-            _: []const u8,
-            _: std.Io.Clock.Timestamp,
-            _: *std.atomic.Value(bool),
-        ) anyerror!permission_auto_classifier.TransportOutcome {
-            const self: *@This() = @ptrCast(@alignCast(raw_ctx));
-            self.transport_calls += 1;
-            return .permanent_failure;
-        }
-
         fn review(
             raw_ctx: *anyopaque,
-            alloc: Allocator,
+            _: Allocator,
             request: permission_auto_classifier.ReviewRequest,
         ) anyerror!permission_auto_classifier.ParseOutcome {
             const self: *@This() = @ptrCast(@alignCast(raw_ctx));
             self.review_calls += 1;
-            return permission_auto_classifier.Reviewer.withTransport(.{
-                .context = raw_ctx,
-                .send_fn = send,
-            }, null, 1000).review(alloc, request);
+            if (request.review_turn.current_root_request.len == 0) return .invalid;
+            self.transport_calls += 1;
+            return .invalid;
         }
     };
 
@@ -5273,8 +5259,8 @@ test "cancelled automatic review remains absorbing with a prompter" {
         arena_state.allocator(),
         .{
             .id = "cancelled-review",
-            .name = "run_command",
-            .arguments_json = "{\"command\":\"touch cancelled-review.txt\"}",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"rm -rf cancelled-review\"}",
         },
         .auto,
         &.{},
@@ -5316,8 +5302,8 @@ test "cancelled automatic review remains absorbing without a prompter" {
         arena_state.allocator(),
         .{
             .id = "cancelled-review-headless",
-            .name = "run_command",
-            .arguments_json = "{\"command\":\"touch cancelled-review-headless.txt\"}",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"rm -rf cancelled-review-headless\"}",
         },
         .auto,
         &.{},

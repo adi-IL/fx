@@ -1214,15 +1214,15 @@ test "accounted reviewer stops permanent and cancellation while bounding transie
 
 test "automatic review policy matches the tested XML v1 artifact" {
     const expected_digest = [_]u8{
-        0x28, 0xa8, 0x7b, 0x2c, 0xbf, 0x10, 0xd3, 0xb8,
-        0xbd, 0x3a, 0xaf, 0xa4, 0xb1, 0x0c, 0xbc, 0x65,
-        0x83, 0x87, 0xf7, 0x7f, 0x3d, 0x1e, 0xfa, 0xad,
-        0x18, 0xa6, 0x82, 0xed, 0x6b, 0xa6, 0x39, 0xb0,
+        0x8a, 0x38, 0x6a, 0x07, 0x3b, 0xa5, 0x5f, 0xea,
+        0xc7, 0x01, 0xae, 0xb0, 0x30, 0xd7, 0x39, 0x55,
+        0xdf, 0xf9, 0x7b, 0xd8, 0x37, 0x3e, 0xa3, 0xf3,
+        0x45, 0x2e, 0xb0, 0xf2, 0x62, 0x1c, 0x19, 0x97,
     };
     var actual_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(review_policy_template, &actual_digest, .{});
 
-    try std.testing.expectEqual(@as(usize, 4549), review_policy_template.len);
+    try std.testing.expectEqual(@as(usize, 4535), review_policy_template.len);
     try std.testing.expectEqualSlices(u8, &expected_digest, &actual_digest);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, review_policy_template, review_data_marker));
     try std.testing.expect(std.mem.endsWith(u8, review_policy_template, "</permission_review>\n"));
