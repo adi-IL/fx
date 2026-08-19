@@ -417,13 +417,17 @@ const VisionProviderScript = struct {
         self.calls += 1;
         switch (response) {
             .content => |text| {
+                try events.emit(.provider_admitted);
                 try events.emit(.{ .text_delta = text });
                 try events.emit(.{ .finish = .{ .reason = .stop } });
             },
-            .failure => |category| try events.emit(.{ .failure = .{
-                .category = category,
-                .retryable = category == .upstream_failure or category == .unavailable,
-            } }),
+            .failure => |category| {
+                try events.emit(.provider_admitted);
+                try events.emit(.{ .failure = .{
+                    .category = category,
+                    .retryable = category == .upstream_failure or category == .unavailable,
+                } });
+            },
             .cancel => {
                 request.cancel_flag.store(true, .seq_cst);
                 try events.emit(.cancelled);
@@ -2661,7 +2665,6 @@ test "processQueuedPrompt projects bounded output limits into gateway requests" 
         var gateway = FakeGateway.init(alloc, &completions);
         defer gateway.deinit();
         var hooks = FakeAgentRuntimeDeps.init(alloc);
-        hooks.available_capability_overrides = &available_overrides;
         defer hooks.deinit();
         var fixture = PromptFixture{};
         var job = fixture.job();
