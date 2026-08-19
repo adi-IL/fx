@@ -219,6 +219,7 @@ const headless_interrupt = if (supports_headless_interrupt) struct {
 pub const Config = struct {
     command_usage: []const u8,
     default_model: []const u8,
+    default_fast_mode: bool = false,
     default_agent_step_limit: usize,
     gateway_retry_count: usize,
     gateway_chat_url: []const u8,
@@ -1330,6 +1331,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         cfg.gateway_provider.oauth_transport,
         cfg.secret_store,
         cfg.default_model,
+        cfg.default_fast_mode,
         cfg.default_agent_step_limit,
         cfg.gateway_provider.connection_seed,
     );
@@ -3631,6 +3633,7 @@ fn loadStartupStateDefault(
     transport: oauth_transport.Provider,
     secret_store: host.SecretStore,
     default_model: []const u8,
+    default_fast_mode: bool,
     default_agent_step_limit: usize,
     connection_seed: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
@@ -3639,6 +3642,7 @@ fn loadStartupStateDefault(
         transport,
         secret_store,
         default_model,
+        default_fast_mode,
         default_agent_step_limit,
         connection_seed,
     );
@@ -3873,7 +3877,7 @@ fn testConfig() Config {
 }
 
 fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_fast_mode: bool, default_agent_step_limit: usize, connection_seed: connection_registry.Seed) !app_lifecycle.StartupState {
-    var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
+    var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit, .fast_mode = default_fast_mode };
     errdefer state.deinit(alloc);
     state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
     state.selected_model = try alloc.dupe(u8, default_model);
@@ -3888,7 +3892,7 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
 }
 
 fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_fast_mode: bool, default_agent_step_limit: usize, connection_seed: connection_registry.Seed) !app_lifecycle.StartupState {
-    var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
+    var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit, .fast_mode = default_fast_mode };
     errdefer state.deinit(alloc);
     state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
     state.credential = .{
@@ -4483,6 +4487,7 @@ test "fake non-Vercel adapter completes an Ask root turn on its admitted route" 
             try std.testing.expectEqualStrings("fake://ask", request.route.endpoint);
             try std.testing.expectEqualStrings("automatic", request.route.credential_ref);
             try std.testing.expectEqualStrings("key", request.credential);
+            try events.emit(.provider_admitted);
             try events.emit(.{ .text_delta = "ask complete" });
             try events.emit(.{ .finish = .{ .reason = .stop } });
         }
@@ -5554,6 +5559,7 @@ fn testLoadStartupStateWithCancellation(
     transport: oauth_transport.Provider,
     secret_store: host.SecretStore,
     default_model: []const u8,
+    default_fast_mode: bool,
     default_agent_step_limit: usize,
     connection_seed: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
@@ -5562,6 +5568,7 @@ fn testLoadStartupStateWithCancellation(
         transport,
         secret_store,
         default_model,
+        default_fast_mode,
         default_agent_step_limit,
         connection_seed,
     );
