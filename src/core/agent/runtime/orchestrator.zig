@@ -2857,16 +2857,10 @@ fn processQueuedPromptLoop(
                 .auto;
             const model_request = agent_stream_provider.ModelRequest{
                 .model = gateway_model,
-                .serialized_tools = if (final_permission_response)
-                    "[]"
-                else
-                    config.gateway_tools_json,
+                .serialized_tools = config.gateway_tools_json,
                 .messages = request_messages,
                 .tool_choice = tool_choice,
-                .selected_dynamic_tool_schemas = if (final_permission_response)
-                    &.{}
-                else
-                    selected_dynamic_tool_schemas.items,
+                .selected_dynamic_tool_schemas = selected_dynamic_tool_schemas.items,
                 .vision_mode = vision_mode,
                 .vision_tool_schema = if (vision_mode == .unavailable)
                     null
