@@ -6673,11 +6673,11 @@ test "app_input_runtime model picker skips effort stage for reasoning model with
     var app = try RoutingFakeApp.init(alloc);
     defer app.deinit();
     app.model_completion_values = &completions;
-    app.gateway_metadata_model = model;
-    app.gateway_metadata = .{ .supports_reasoning = true };
+    app.descriptor_override_model = model;
+    app.descriptor_override_capabilities = .{ .supports_reasoning = true };
     try app.input_runtime.textReplacementState().replace(alloc, "/model ");
 
-    const capabilities = app.resolvedModelCapabilities(model);
+    const capabilities = app.resolvedModelDescriptor(model).capabilities;
     try std.testing.expect(capabilities.supports_reasoning);
     try std.testing.expectEqual(@as(usize, 0), capabilities.reasoning_efforts.len);
 
