@@ -6068,7 +6068,7 @@ test "built-in structured review sends exact arguments without redundant schema"
 
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqualStrings(arguments, fake.exact_arguments_json.?);
-    try std.testing.expect(fake.schema_json == null);
+    try std.testing.expect(fake.schema_name == null);
     try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
 }
 
