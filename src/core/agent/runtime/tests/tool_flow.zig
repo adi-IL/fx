@@ -15,7 +15,7 @@ const diff = @import("../../../output/diff.zig");
 const file_mutation = @import("../../../tooling/file_mutation.zig");
 const command_result_mapping = @import("../../../tooling/command_result_mapping.zig");
 const tool_dispatch = @import("../../../tooling/tool_dispatch.zig");
-const tool_descriptor = @import("../../../tooling/tool_descriptor.zig");
+const gateway_schema = @import("../../../tooling/gateway_schema.zig");
 const tool_specs = @import("../../../tooling/tool_specs.zig");
 const tool_result_errors = @import("../../../tooling/tool_result_errors.zig");
 const context_contract = @import("../../../workspace/context_contract.zig");
@@ -64,7 +64,7 @@ const toolCall = test_support.toolCall;
 const vision_agent_test_tools = test_support.vision_agent_test_tools;
 const VisionAgentToolRuntime = test_support.VisionAgentToolRuntime;
 
-const fixture_tools = &.{tool_descriptor.Descriptor{
+const fixture_tools = &.{gateway_schema.FunctionSchema{
     .name = "read_file",
     .description = "Read a file",
 }};

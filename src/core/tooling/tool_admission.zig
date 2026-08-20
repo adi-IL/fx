@@ -8,6 +8,7 @@ const command_environment = @import("../execution/command_environment.zig");
 const command_effect = @import("../shell_command/command_effect.zig");
 const file_mutation = @import("file_mutation.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
+const gateway_schema = @import("gateway_schema.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const io_mod = @import("../shared/io.zig");
 const text_utils = @import("../shared/text_utils.zig");
