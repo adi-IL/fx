@@ -948,7 +948,7 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "automatic review receives a large prepared overwrite before blocking on ask",
+    "oversized automatic review fails closed before reviewer traffic",
     async () => {
       const root = createIsolatedRoot();
       const target = join(root.external, "large-review.txt");
@@ -995,10 +995,7 @@ describe("filesystem path handling", () => {
         const json = parseFxJson(result);
 
         expect(gateway.requests).toHaveLength(2);
-        expect(gateway.classifierRequests).toHaveLength(1);
-        expect(
-          Buffer.byteLength(gateway.classifierRequests[0]!.body),
-        ).toBeGreaterThan(16 * 1024);
+        expect(gateway.classifierRequests).toHaveLength(0);
         expect(gateway.remainingResponseCount()).toBe(0);
         expect(json.tool_calls).toEqual([
           { name: "write_file", status: "error" },
