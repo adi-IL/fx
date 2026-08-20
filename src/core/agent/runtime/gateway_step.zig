@@ -590,10 +590,12 @@ test "neutral adapter events materialize owned completion state" {
     const Fake = struct {
         fn stream(
             _: *const agent_stream_provider.ProviderAdapter,
-            _: Allocator,
+            alloc: Allocator,
             _: agent_stream_provider.AdapterRequest,
             events: agent_stream_provider.EventSink,
         ) anyerror!void {
+            const lookup_scope = try alloc.dupe(u8, "https://example.invalid/generation");
+            defer alloc.free(lookup_scope);
             try events.emit(.provider_admitted);
             var generation = [_]u8{ 'r', 'e', 'q', 'u', 'e', 's', 't', '-', '4', '2' };
             const local_call = types.ToolCall{
@@ -619,9 +621,11 @@ test "neutral adapter events materialize owned completion state" {
                 .reason = .tool_calls,
                 .generation_reference = .{
                     .id = &generation,
+                    .lookup_scope = lookup_scope,
                 },
             } });
             @memset(&generation, 'x');
+            @memset(lookup_scope, 'x');
         }
     };
     const Callbacks = struct {
@@ -682,7 +686,10 @@ test "neutral adapter events materialize owned completion state" {
     try std.testing.expectEqual(session_usage.Availability.pending, usage_snapshot.billing);
     try std.testing.expectEqual(@as(usize, 1), usage_snapshot.pending.len);
     try std.testing.expectEqualStrings("request-42", usage_snapshot.pending[0].id);
-    try std.testing.expect(usage_snapshot.pending[0].lookup_scope == null);
+    try std.testing.expectEqualStrings(
+        "https://example.invalid/generation",
+        usage_snapshot.pending[0].lookup_scope.?,
+    );
 }
 
 test "normalized adapter failure retains semantic recovery facts" {

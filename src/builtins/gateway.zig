@@ -72,7 +72,6 @@ pub const VercelTransportResponse = struct {
     status: std.http.Status,
     completion: shared_types.ModelCompletion = .{},
     err_body: ?[]u8 = null,
-    generation_origin: []const u8 = "",
     failure_schema: ?[]u8 = null,
     failure_request_shape: ?[]u8 = null,
     retry_after_seconds: ?u64 = null,
@@ -1076,6 +1075,16 @@ pub fn streamVercelAdapter(
             return;
         }
     }
+    const generation_scope = gateway_client.generationBaseUrl();
+    if (!shared_types.validGenerationLookupScope(generation_scope) or
+        !gateway_client.isTrustedGenerationOrigin(generation_scope))
+    {
+        try events.emit(.{ .failure = .{
+            .category = .configuration,
+            .detail = "invalid generation lookup scope",
+        } });
+        return;
+    }
     try events.emit(.provider_admitted);
 
     var bridge = AdapterEventBridge{ .events = events };
@@ -1158,7 +1167,7 @@ pub fn streamVercelAdapter(
             .reason = result.completion.finish_reason,
             .generation_reference = if (result.completion.generation_id) |id| .{
                 .id = id,
-                .lookup_scope = result.generation_origin,
+                .lookup_scope = generation_scope,
             } else null,
             .generation_metadata_invalid = result.completion.generation_metadata_invalid,
             .delivery_ambiguous = result.completion.delivery_ambiguous,
@@ -1346,6 +1355,185 @@ test "Vercel adapter enforces exact serialized limit before admission" {
     try std.testing.expectEqual(@as(usize, 0), capture.admitted);
     try std.testing.expectEqual(@as(usize, 1), capture.failures);
     try std.testing.expect(!state.provider_admitted);
+}
+
+fn vercelAdapterTestRoute() route_snapshot_contract.RouteSnapshot {
+    return .{
+        .connection_id = @constCast("vercel"),
+        .adapter_kind = @constCast(connection_seed.adapter_id),
+        .endpoint = @constCast("provider:endpoint"),
+        .protocol = @constCast("vercel_ai_gateway"),
+        .credential_ref = @constCast("automatic"),
+        .primary_model_id = @constCast("test/model"),
+        .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = @constCast("test/model"),
+        .capabilities = .{},
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+}
+
+fn streamVercelAdapterTestRequest(
+    adapter: agent_stream_provider_contract.ProviderAdapter,
+    route: *const route_snapshot_contract.RouteSnapshot,
+    delivery: *agent_stream_provider_contract.DeliveryCertainty,
+    attempt_evidence: *agent_stream_provider_contract.AttemptEvidence,
+    cancelled: *std.atomic.Value(bool),
+    events: agent_stream_provider_contract.EventSink,
+) !void {
+    try adapter.stream(std.testing.allocator, .{
+        .model_request = .{
+            .tools = &.{},
+            .messages = &.{},
+            .tool_choice = .none,
+            .capabilities = .{},
+        },
+        .route = route,
+        .credential = "credential",
+        .tenant = null,
+        .model_id = "test/model",
+        .retry_count = 1,
+        .trace_ctx = .{},
+        .content_capture_limit = null,
+        .delivery = delivery,
+        .attempt_evidence = attempt_evidence,
+        .cancel_flag = cancelled,
+    }, events);
+}
+
+test "Vercel adapter owns generation lookup scope for transport completions" {
+    const scope = "http://127.0.0.1:43123/gateway";
+    const env = try AdapterAuthTestEnv.install(std.testing.allocator, &.{.{
+        "FX_GATEWAY_BASE_URL",
+        scope ++ "/",
+    }});
+    defer env.deinit();
+
+    const FakeTransport = struct {
+        calls: usize = 0,
+
+        fn stream(raw: ?*anyopaque, _: Allocator, _: VercelTransportRequest) anyerror!VercelTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .{ .status = .ok, .completion = .{
+                .generation_id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                .finish_reason = .stop,
+            } };
+        }
+    };
+    const Capture = struct {
+        admitted: usize = 0,
+        finished: usize = 0,
+
+        fn emit(raw: *anyopaque, event: agent_stream_provider_contract.StreamEvent) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (event) {
+                .provider_admitted => self.admitted += 1,
+                .finish => |finish| {
+                    const reference = finish.generation_reference orelse return error.MissingGenerationReference;
+                    try std.testing.expectEqualStrings("gen_01ARZ3NDEKTSV4RRFFQ69G5FAV", reference.id);
+                    try std.testing.expectEqualStrings(scope, reference.lookup_scope.?);
+                    self.finished += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var fake_transport: FakeTransport = .{};
+    var transport = VercelTransport{ .context = &fake_transport, .stream_fn = FakeTransport.stream };
+    var adapter = provider_adapter;
+    adapter.context = &transport;
+    var cancelled = std.atomic.Value(bool).init(false);
+    var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider_contract.AttemptEvidence = .{};
+    var route = vercelAdapterTestRoute();
+    var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    defer state.deinit();
+    var sink_error: ?anyerror = null;
+    var capture: Capture = .{};
+    try streamVercelAdapterTestRequest(adapter, &route, &delivery, &attempt_evidence, &cancelled, .{
+        .context = &capture,
+        .state = &state,
+        .sink_error = &sink_error,
+        .emit_fn = Capture.emit,
+    });
+    try std.testing.expectEqual(@as(usize, 1), fake_transport.calls);
+    try std.testing.expectEqual(@as(usize, 1), capture.admitted);
+    try std.testing.expectEqual(@as(usize, 1), capture.finished);
+}
+
+test "Vercel adapter rejects invalid normalized generation scope before effects" {
+    var oversized_tail: [512]u8 = @splat('a');
+    const oversized_scope = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "http://127.0.0.1:43123/{s}",
+        .{&oversized_tail},
+    );
+    defer std.testing.allocator.free(oversized_scope);
+    const env = try AdapterAuthTestEnv.install(std.testing.allocator, &.{.{
+        "FX_GATEWAY_BASE_URL",
+        oversized_scope,
+    }});
+    defer env.deinit();
+
+    const FakeTransport = struct {
+        calls: usize = 0,
+
+        fn stream(raw: ?*anyopaque, _: Allocator, _: VercelTransportRequest) anyerror!VercelTransportResponse {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .{ .status = .ok, .completion = .{ .finish_reason = .stop } };
+        }
+    };
+    const Capture = struct {
+        admitted: usize = 0,
+        failures: usize = 0,
+
+        fn emit(raw: *anyopaque, event: agent_stream_provider_contract.StreamEvent) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (event) {
+                .provider_admitted => self.admitted += 1,
+                .failure => |failure| {
+                    try std.testing.expectEqual(
+                        agent_stream_provider_contract.StreamFailure.Category.configuration,
+                        failure.category,
+                    );
+                    self.failures += 1;
+                },
+                else => {},
+            }
+        }
+    };
+
+    var fake_transport: FakeTransport = .{};
+    var transport = VercelTransport{ .context = &fake_transport, .stream_fn = FakeTransport.stream };
+    var adapter = provider_adapter;
+    adapter.context = &transport;
+    var cancelled = std.atomic.Value(bool).init(false);
+    var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider_contract.AttemptEvidence = .{};
+    var route = vercelAdapterTestRoute();
+    var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    defer state.deinit();
+    var sink_error: ?anyerror = null;
+    var capture: Capture = .{};
+    try streamVercelAdapterTestRequest(adapter, &route, &delivery, &attempt_evidence, &cancelled, .{
+        .context = &capture,
+        .state = &state,
+        .sink_error = &sink_error,
+        .emit_fn = Capture.emit,
+    });
+    try std.testing.expectEqual(@as(usize, 0), fake_transport.calls);
+    try std.testing.expectEqual(@as(usize, 0), capture.admitted);
+    try std.testing.expectEqual(@as(usize, 1), capture.failures);
+    try std.testing.expectEqual(
+        agent_stream_provider_contract.DeliveryCertainty.State.definitely_unsent,
+        delivery.load(),
+    );
+    try std.testing.expect(!attempt_evidence.provider_admitted);
 }
 
 test "Vercel and peer adapters receive equivalent neutral requests with isolated wire formats" {
@@ -1860,7 +2048,6 @@ fn streamVercelTransport(
         .status = result.status,
         .completion = result.completion,
         .err_body = result.err_body,
-        .generation_origin = gateway_client.generationBaseUrl(),
         .failure_schema = diagnostics.schema,
         .failure_request_shape = diagnostics.request_shape,
         .retry_after_seconds = result.retry_after_seconds,
