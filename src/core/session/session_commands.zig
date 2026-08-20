@@ -1120,7 +1120,6 @@ pub fn Commands(comptime App: type) type {
                 app.selected_model.appendSliceAssumeCapacity(stable);
             }
             const selected = app.selected_model.items;
-            try app.worker.syncQueuedPromptModel(std.heap.c_allocator, selected);
             if (comptime @hasDecl(App, "persistAcceptedModel")) try app.persistAcceptedModel(selected);
             // Keep the session or workspace discriminator while updating the
             // model shown as secondary terminal-tab context.
@@ -2197,7 +2196,7 @@ test "session_commands handleModel resolves fuzzy cached model for future turns"
     try Commands(FakeApp).handleModel(&app, "claude sonnet");
 
     try std.testing.expectEqualStrings("anthropic/claude-sonnet-4-20250514", app.selected_model.items);
-    try std.testing.expectEqualStrings("anthropic/claude-sonnet-4-20250514", app.worker.synced_model.?);
+    try std.testing.expect(app.worker.synced_model == null);
     try std.testing.expectEqualStrings(
         "workspace · anthropic/claude-sonnet-4-20250514",
         app.terminalTitleLabelText(),
@@ -2214,7 +2213,7 @@ test "session_commands handleModel falls back to raw query when model fetch fail
     try Commands(FakeApp).handleModel(&app, "custom/provider-model");
 
     try std.testing.expectEqualStrings("custom/provider-model", app.selected_model.items);
-    try std.testing.expectEqualStrings("custom/provider-model", app.worker.synced_model.?);
+    try std.testing.expect(app.worker.synced_model == null);
     try std.testing.expectEqualStrings(
         "workspace · custom/provider-model",
         app.terminalTitleLabelText(),
