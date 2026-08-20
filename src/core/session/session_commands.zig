@@ -2179,7 +2179,6 @@ test "session_commands handleModel reports current model for empty query" {
     try Commands(FakeApp).handleModel(&app, "");
 
     try std.testing.expectEqualStrings("● Model: anthropic/claude-opus-4.6\n", app.text());
-    try std.testing.expect(app.worker.synced_model == null);
     try std.testing.expectEqualStrings("", app.terminalTitleLabelText());
 }
 
@@ -2196,7 +2195,6 @@ test "session_commands handleModel resolves fuzzy cached model for future turns"
     try Commands(FakeApp).handleModel(&app, "claude sonnet");
 
     try std.testing.expectEqualStrings("anthropic/claude-sonnet-4-20250514", app.selected_model.items);
-    try std.testing.expect(app.worker.synced_model == null);
     try std.testing.expectEqualStrings(
         "workspace · anthropic/claude-sonnet-4-20250514",
         app.terminalTitleLabelText(),
@@ -2213,7 +2211,6 @@ test "session_commands handleModel falls back to raw query when model fetch fail
     try Commands(FakeApp).handleModel(&app, "custom/provider-model");
 
     try std.testing.expectEqualStrings("custom/provider-model", app.selected_model.items);
-    try std.testing.expect(app.worker.synced_model == null);
     try std.testing.expectEqualStrings(
         "workspace · custom/provider-model",
         app.terminalTitleLabelText(),

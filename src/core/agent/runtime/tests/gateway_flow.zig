@@ -564,7 +564,7 @@ test "processQueuedPrompt recovers when a model rejects post-Vision assistant pr
     hooks.execute_delegate = vision_runtime.delegate();
     var fixture = PromptFixture{};
     var job = fixture.job();
-    job.model = @constCast("anthropic/claude-fable-5");
+    job.route = test_support.testRouteForModel(@constCast("anthropic/claude-fable-5"));
     job.prompt = @constCast("Describe the attached image.");
     job.images = &images;
     job.authorized_image_catalog = &images;
