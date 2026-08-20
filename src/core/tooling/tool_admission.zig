@@ -6028,7 +6028,7 @@ test "sandbox widening prompt bounds oversized command labels" {
     try std.testing.expect(recording.last_label_len <= 160);
 }
 
-test "built-in structured review sends exact arguments without redundant schema" {
+test "built-in structured review sends exact arguments and schema" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
@@ -6061,7 +6061,8 @@ test "built-in structured review sends exact arguments without redundant schema"
 
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqualStrings(arguments, fake.exact_arguments_json.?);
-    try std.testing.expect(fake.schema_json == null);
+    try std.testing.expect(fake.schema_json != null);
+    try std.testing.expect(std.mem.find(u8, fake.schema_json.?, "\"terminal\"") != null);
     try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
 }
 
