@@ -1324,7 +1324,7 @@ fn isPostVisionAssistantPrefillRejection(
     messages: []const ChatMessage,
 ) bool {
     const facts = failure orelse return false;
-    if (facts.response_code != 400 or messages.len == 0) return false;
+    if (facts.response_status != 400 or messages.len == 0) return false;
     const tail = messages[messages.len - 1];
     if (tail.role != .tool or
         !std.mem.eql(u8, tail.tool_name orelse return false, "vision"))

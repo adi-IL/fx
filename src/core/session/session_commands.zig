@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const app_permission_runtime = @import("../app/app_permission_runtime.zig");
 const app_session_runtime = @import("../app/app_session_runtime.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
