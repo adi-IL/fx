@@ -67,9 +67,9 @@ pub const FunctionSchema = struct {
             }
             return;
         }
-        if (self.input_schema.min_properties != null and
-            self.input_schema.max_properties != null and
-            self.input_schema.min_properties.? > self.input_schema.max_properties.?)
+        if (self.input_schema.min_properties != no_u32_bound and
+            self.input_schema.max_properties != no_u32_bound and
+            self.input_schema.min_properties > self.input_schema.max_properties)
         {
             return error.InvalidToolSchema;
         }
