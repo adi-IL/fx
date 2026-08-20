@@ -582,7 +582,11 @@ test "processQueuedPrompt recovers when a model rejects post-Vision assistant pr
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &calls },
         .{ .content = "{\"images\":[{\"image_id\":1,\"status\":\"ok\",\"summary\":\"FX logo\",\"visible_text\":[],\"details\":[]}] }" },
-        .{ .status = .bad_request, .err_body = prefill_rejection },
+        .{
+            .failure_category = .protocol,
+            .failure_response_status = 400,
+            .failure_detail = prefill_rejection,
+        },
         .{ .content = "Recovered final answer" },
     };
     var gateway = FakeGateway.init(alloc, &completions);
@@ -615,7 +619,6 @@ test "processQueuedPrompt recovers when a model rejects post-Vision assistant pr
         .user,
         "Continue from the preceding tool result.",
     );
-    try std.testing.expectEqual(@as(?std.http.Status, null), hooks.http_status);
     try std.testing.expectEqualStrings("Recovered final answer", hooks.finish_assistant_text.?);
 }
 

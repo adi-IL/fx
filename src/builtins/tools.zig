@@ -177,10 +177,10 @@ const terminal_properties = [_]tool_descriptor.Property{
     .{ .name = "session_id", .json_type = .string, .description = "Required for session-targeted actions. Set null for start and list; owner-catalog authority is private." },
     .{ .name = "cwd", .json_type = .string, .description = "Working directory for exec or start; defaults to the workspace." },
     .{ .name = "command", .json_type = .string, .max_length = terminal_contracts.max_command_bytes, .description = "Command for exec, or optional command for start; omit on start for an interactive shell." },
-        .{ .name = "profile", .json_type = .string, .shape = &.{ .enum_values = &.{ "clean", "user" } }, .description = "Startup profile for exec or start; omission defaults to user, while clean skips user startup files. User-profile execution supports the configured Bash or zsh login shell. Bash login execution reads login startup files; .bashrc is available only when sourced by the login profile. For start, an explicit shell is used instead of the default profile and is mutually exclusive with profile." },
-        .{ .name = "shell", .json_type = .object, .shape = &.{ .object = &terminal_shell_schema } },
-        .{ .name = "backend", .json_type = .string, .shape = &.{ .enum_values = &.{ "native", "tmux" } }, .description = "Start backend or optional list filter." },
-        .{ .name = "return_when", .json_type = .object, .shape = &.{ .object = &terminal_return_schema }, .description = "Only for start or wait; required for every wait. After a signal intended to stop the session, use kind exit. For output matching, use kind match with pattern; output_contains is monitor-only." },
+    .{ .name = "profile", .json_type = .string, .shape = &.{ .enum_values = &.{ "clean", "user" } }, .description = "Startup profile for exec or start; omission defaults to user, while clean skips user startup files. User-profile execution supports the configured Bash or zsh login shell. Bash login execution reads login startup files; .bashrc is available only when sourced by the login profile. For start, an explicit shell is used instead of the default profile and is mutually exclusive with profile." },
+    .{ .name = "shell", .json_type = .object, .shape = &.{ .object = &terminal_shell_schema } },
+    .{ .name = "backend", .json_type = .string, .shape = &.{ .enum_values = &.{ "native", "tmux" } }, .description = "Start backend or optional list filter." },
+    .{ .name = "return_when", .json_type = .object, .shape = &.{ .object = &terminal_return_schema }, .description = "Only for start or wait; required for every wait. After a signal intended to stop the session, use kind exit. For output matching, use kind match with pattern; output_contains is monitor-only." },
     .{ .name = "wait_ceiling_ms", .json_type = .integer, .minimum = 1, .description = "Required for wait; required for start when return_when is non-immediate; maximum blocking time in milliseconds." },
     .{ .name = "dimensions", .json_type = .object, .shape = &.{ .object = &terminal_dimensions_schema } },
     .{ .name = "initial_monitors", .json_type = .array, .max_items = 32, .shape = &.{ .array_objects = &terminal_monitor_definition_schema } },
@@ -1506,7 +1506,7 @@ test "terminal neutral advertisement projects a compatible object schema" {
     try std.testing.expectEqual(terminal_model_properties.len, descriptor.input_schema.properties.len);
     try std.testing.expectEqual(
         terminal_actions.len,
-        schemaProperty(descriptor.input_schema, "action").?.enum_values.len,
+        schemaEnumValues(schemaProperty(descriptor.input_schema, "action").?).len,
     );
     try std.testing.expectEqualSlices([]const u8, &terminal_model_required, descriptor.input_schema.required);
 }
