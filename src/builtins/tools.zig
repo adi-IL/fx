@@ -1406,7 +1406,7 @@ test "terminal advertisement projects a provider-neutral object schema" {
     const action_property = schemaProperty(input_schema, "action") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
         terminal_actions.len,
-        action_property.enum_values.len,
+        schemaEnumValues(action_property).len,
     );
     try std.testing.expectEqual(terminal_gateway_properties.len, input_schema.required.len);
     for (terminal_gateway_properties, input_schema.required) |property, required_name| {

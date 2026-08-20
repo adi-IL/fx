@@ -936,7 +936,15 @@ test "automatic review schema is strict and has no confidence field" {
     try std.testing.expectEqualStrings(tool_name, function_schema.name);
     try std.testing.expectEqual(@as(?bool, false), function_schema.input_schema.additional_properties);
     try std.testing.expectEqual(@as(usize, 4), function_schema.input_schema.properties.len);
-    try std.testing.expectEqualSlices([]const u8, &.{ "allow", "ask" }, function_schema.input_schema.properties[2].enum_values);
+    const decision_shape = function_schema.input_schema.properties[2].shape.?;
+    switch (decision_shape.*) {
+        .enum_values => |values| try std.testing.expectEqualSlices(
+            []const u8,
+            &.{ "allow", "ask" },
+            values,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "automatic reviewer defaults to the tested fifteen second budget" {
