@@ -1896,8 +1896,8 @@ fn pushRouteRecoveryStatus(
 fn pushText(raw_ctx: *anyopaque, emission: agent_runtime.TextEmission) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const text = switch (emission) {
-        .assistant_source => return,
-        .assistant_rendered => |text| text,
+        .assistant_source => |text| text,
+        .assistant_rendered => return,
         .operational => |text| text,
     };
     if (text.len == 0) return;
