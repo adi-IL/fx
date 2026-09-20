@@ -206,12 +206,97 @@ fn fetch_cli_catalog(raw: ?*anyopaque, alloc: Allocator, input: gateway_provider
     }
 }
 
-fn review(_: ?*anyopaque, alloc: Allocator, _: classifier.ProviderInput, _: classifier.ReviewRequest) !classifier.ParseOutcome {
-    return .{
-        .valid = .{
-            .risk = .low,
-            .decision = .clear,
-            .rationale = try alloc.dupe(u8, "Vertex native review: clear"),
-        },
+const Review = struct { definition: *const definitions.Definition, input: classifier.ProviderInput };
+fn review(raw: ?*anyopaque, alloc: Allocator, input: classifier.ProviderInput, request: classifier.ReviewRequest) !classifier.ParseOutcome {
+    var state = Review{ .definition = definition_at(raw), .input = input };
+    return classifier.Reviewer.withTransportModel(.{ .context = &state, .build_fn = build_review, .send_fn = send_review }, input.cancel_flag, classifier.Reviewer.default_timeout_ms, state.definition.reviewer_model orelse request.review_turn.model).review(alloc, request);
+}
+fn build_review(raw: *anyopaque, alloc: Allocator, model: []const u8, _: []const u8, instructions: []const types.ChatMessage, messages: []const types.ChatMessage, target_id: []const u8, deadline: std.Io.Clock.Timestamp, cancel: *std.atomic.Value(bool)) ![]u8 {
+    const state: *Review = @ptrCast(@alignCast(raw));
+    const expanded = try review_messages.expandPendingToolReviewMessages(alloc, messages, target_id, deadline, cancel);
+    defer alloc.free(expanded);
+    const output_limit = if (state.definition.model(model)) |metadata| @min(metadata.max_output_tokens orelse 2048, 2048) else 2048;
+    return build(@ptrCast(@constCast(state.definition)), alloc, .{ .model = model, .instructions = instructions, .messages = expanded, .tools = .{ .additional_functions = &.{classifier.function_schema} }, .tool_choice = .required, .provider_options = .{}, .max_output_tokens = output_limit });
+}
+fn ignore_event(_: *anyopaque, _: streams.Event) void {}
+fn free_result(raw: *anyopaque, alloc: Allocator) void {
+    const result: *streams.Result = @ptrCast(@alignCast(raw));
+    result.deinit(alloc);
+    alloc.destroy(result);
+}
+fn send_review(raw: *anyopaque, alloc: Allocator, model: []const u8, payload: []const u8, deadline: std.Io.Clock.Timestamp, cancel: *std.atomic.Value(bool)) !classifier.TransportOutcome {
+    const state: *Review = @ptrCast(@alignCast(raw));
+    var delivery: streams.DeliveryCertainty = .init();
+    var evidence: streams.AttemptEvidence = .{};
+    var event_context: u8 = 0;
+    var result = gateway_step.streamModelCompletion(bundle(state.definition).agent_stream.?, alloc, .{
+        .credential = .{ .direct = .{ .secret_bytes = state.input.credential, .source = state.input.credential_source } },
+        .model = model,
+        .retry_count = 1,
+        .messages = &.{},
+        .tools = .{ .additional_functions = &.{classifier.function_schema} },
+        .tool_choice = .required,
+        .provider_options = .{},
+        .prepared_request_body = payload,
+        .trace_ctx = .{},
+        .content_capture_limit = 16 * 1024,
+        .deadline = deadline,
+        .delivery = &delivery,
+        .attempt_evidence = &evidence,
+        .events = .{ .context = &event_context, .emit_fn = ignore_event },
+        .cancel_flag = cancel,
+    }, state.input.usage, state.input.usage_allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Cancelled => return .cancelled,
+        error.Timeout => return .timed_out,
+        error.RequiredToolMissing => return .{ .completion = .{ .completion = .{} } },
+        else => return .permanent_failure,
     };
+    errdefer result.deinit(alloc);
+    if (result == .failed) {
+        result.deinit(alloc);
+        return .permanent_failure;
+    }
+    const owned = try alloc.create(streams.Result);
+    owned.* = result;
+    return .{ .completion = .{ .completion = owned.completed.completion, .context = owned, .deinit_fn = free_result } };
+}
+
+test "vertex permission review fails closed without credentials instead of rubber-stamping clear" {
+    const definition = definitions.Definition{
+        .id = "vertex",
+        .protocol = .@"google-vertex",
+        .base_url = "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models",
+        .auth = .{ .bearer = "VERTEX_TOKEN" },
+        .reviewer_model = "gemini-3.8-flash",
+    };
+    const pending = types.ChatMessage{
+        .role = .assistant,
+        .tool_calls = &.{.{
+            .id = "call_1",
+            .name = "glob_files",
+            .arguments_json = "{\"pattern\":\"*\"}",
+        }},
+    };
+    const request = classifier.ReviewRequest{
+        .review_turn = .{
+            .model = "gemini-3.8-flash",
+            .pending_assistant = pending,
+            .target_call_id = "call_1",
+            .origin = .root,
+            .trusted_root_context = "User asked to inspect the repository.",
+        },
+        .targets = &.{},
+        .action = .{ .tool = .{
+            .tool_name = "glob_files",
+            .arguments_json = "{\"pattern\":\"*\"}",
+        } },
+    };
+    var outcome = try review(@ptrCast(@constCast(&definition)), std.testing.allocator, .{
+        .credential = "",
+        .credential_source = .configured,
+    }, request);
+    defer outcome.deinit(std.testing.allocator);
+    try std.testing.expectEqual(std.meta.Tag(classifier.ParseOutcome).invalid, std.meta.activeTag(outcome));
+    try std.testing.expectEqual(classifier.InvalidReason.transport_permanent, outcome.invalid);
 }

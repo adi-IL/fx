@@ -377,6 +377,7 @@ pub const Reducer = struct {
     alloc: Allocator,
     limits: Limits,
     content: std.ArrayList(u8) = .empty,
+    reasoning_delta: std.ArrayList(u8) = .empty,
     tools: std.ArrayList(types.ToolCall) = .empty,
     signatures: std.ArrayList(ToolSig) = .empty,
     usage: types.Usage = .{},
@@ -399,6 +400,7 @@ pub const Reducer = struct {
 
     pub fn deinit(self: *Reducer) void {
         self.content.deinit(self.alloc);
+        self.reasoning_delta.deinit(self.alloc);
         for (self.tools.items) |*tool| {
             self.alloc.free(tool.id);
             self.alloc.free(tool.name);
@@ -471,10 +473,13 @@ pub const Reducer = struct {
                 if (t_val == .string and t_val.string.len > 0) {
                     const is_thought = if (part.object.get("thought")) |th| (th == .bool and th.bool) else false;
                     if (is_thought) {
-                        deltas.reasoning = t_val.string;
+                        self.reasoning_delta.clearRetainingCapacity();
+                        try self.reasoning_delta.appendSlice(self.alloc, t_val.string);
+                        deltas.reasoning = self.reasoning_delta.items;
                     } else {
+                        const start = self.content.items.len;
                         try self.content.appendSlice(self.alloc, t_val.string);
-                        deltas.content = t_val.string;
+                        deltas.content = self.content.items[start..];
                     }
                 }
             }
