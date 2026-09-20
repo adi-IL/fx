@@ -67,7 +67,7 @@ Add named connections for OpenAI Chat Completions endpoints (including Ollama an
 ```bash
 fx provider local
 FX_PROVIDER=openrouter FX_MODEL=openai/gpt-4.1 fx ask "review this change"
-FX_PROVIDER=vertex FX_MODEL=gemini-2.5-flash fx ask "review this change"
+FX_PROVIDER=vertex FX_MODEL=gemini-3.8-flash fx ask "review this change"
 ```
 
 See [Custom model connections](https://fx.sh/docs/configure-fx/custom-model-connections) for connection JSON, model metadata, and behavior details.
