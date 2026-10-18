@@ -11,7 +11,7 @@ const configured_provider = @import("../core/config/configured_provider.zig");
 const chat_completions = @import("../gateway/chat_completions.zig");
 const google_vertex = @import("../gateway/google_vertex.zig");
 
-fn route_configured(definition: *const configured_provider.Definition) provider_set.Bundle {
+fn configuredBundle(_: ?*anyopaque, definition: *const configured_provider.Definition) provider_set.Bundle {
     return switch (definition.protocol) {
         .@"openai-chat-completions" => chat_completions.bundle(definition),
         .@"google-vertex" => google_vertex.bundle(definition),
@@ -19,7 +19,7 @@ fn route_configured(definition: *const configured_provider.Definition) provider_
 }
 
 pub const native = provider_set.Set{
-    .configured_fn = route_configured,
+    .configured_fn = configuredBundle,
     .gateway = gateway.provider_bundle,
     .codex = .{
         .presentation = provider_catalog.find(.codex),

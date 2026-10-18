@@ -1,8 +1,10 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const vision_contracts = @import("../agent/runtime/vision_contracts.zig");
 const command_admission = @import("../permissions/command_admission.zig");
+const shell_snapshot = @import("../terminal/shell_snapshot.zig");
 const command_environment = @import("../execution/command_environment.zig");
 const command_effect = @import("../shell_command/command_effect.zig");
 const command_lex = @import("../shell_command/command_lex.zig");
@@ -312,11 +314,19 @@ fn hashIdentityField(value: []const u8) types.ContentHash {
 pub const FileMutationPreparation = union(enum) {
     prepared: PreparedFileMutationCall,
     tool_failure: []const u8,
+    /// The name matches the file-mutation contract but the registered tool is
+    /// a host-supplied executor (e.g. an embedder's own `write_file`), so the
+    /// builtin mutation contract does not apply and the caller must fall back
+    /// to ordinary dispatch.
+    not_file_mutation,
 };
 
 const FileMutationDecodeResult = union(enum) {
     input: file_mutation_contract.FileMutationInput,
     failure: []const u8,
+    /// Registered, but executed by the host rather than the builtin file
+    /// mutation implementation.
+    not_file_mutation,
 };
 
 var file_mutation_decode_count: usize = 0;
@@ -336,6 +346,9 @@ fn decodeFileMutationInput(
     const kind: file_mutation_contract.Kind = switch (tool.executor_kind) {
         .write_file => .write,
         .edit_file => .edit,
+        // A host tool may reuse the reserved names; it is not the builtin
+        // mutation, so the contract steps aside instead of failing the call.
+        .host => return .not_file_mutation,
         else => return .{ .failure = try arena.dupe(
             u8,
             "unsupported file mutation tool",
@@ -386,6 +399,7 @@ pub fn prepareFileMutationCall(
         call,
     )) {
         .failure => |reason| return .{ .tool_failure = reason },
+        .not_file_mutation => return .not_file_mutation,
         .input => |value| value,
     };
     var input_owned = true;
@@ -397,8 +411,7 @@ pub fn prepareFileMutationCall(
         request.workspace_root,
         input,
     )) {
-        .target_resolution_failure => |failure| return .{ .tool_failure = try std.fmt.allocPrint(
-            alloc,
+        .target_resolution_failure => |failure| return .{ .tool_failure = try alloc.print(
             "file mutation target resolution failed: {s}",
             .{@tagName(failure)},
         ) },
@@ -468,8 +481,7 @@ pub fn preflightPreparedFileMutation(
         );
     var policy_targets = switch (policy_result) {
         .target_resolution_failure => |failure| {
-            return .{ .tool_failure = try std.fmt.allocPrint(
-                arena,
+            return .{ .tool_failure = try arena.print(
                 "file mutation target resolution failed: {s}",
                 .{@tagName(failure)},
             ) };
@@ -586,6 +598,9 @@ pub fn preflightFileMutation(
         .workspace_root = request.workspace_root,
     })) {
         .tool_failure => |reason| return .{ .tool_failure = reason },
+        // The preflight contract only exists for the builtin file mutations;
+        // a host tool that reused the name cannot be preflighted through it.
+        .not_file_mutation => return .{ .tool_failure = "file mutation preflight is unavailable for host tools" },
         .prepared => |value| value,
     };
     defer prepared.deinit(arena);
@@ -684,9 +699,9 @@ fn pathContainsComponentSequence(
     var matched: usize = 0;
     var index: usize = 0;
     while (index < path.len) {
-        while (index < path.len and std.fs.path.isSep(path[index])) : (index += 1) {}
+        while (index < path.len and std.Io.Dir.path.isSep(path[index])) : (index += 1) {}
         const start = index;
-        while (index < path.len and !std.fs.path.isSep(path[index])) : (index += 1) {}
+        while (index < path.len and !std.Io.Dir.path.isSep(path[index])) : (index += 1) {}
         if (start == index) break;
         const component = path[start..index];
         if (std.mem.eql(u8, component, expected[matched])) {
@@ -1089,7 +1104,7 @@ fn resolveOrdinaryPermissionOutcome(
             call,
             permission_mode,
         );
-        if (default_outcome.execution_authority != null) return default_outcome;
+        if (default_outcome.execution_authority != null or default_outcome.tool_failure != null) return default_outcome;
     }
     if (toolApprovalPolicy(input, call.name) == .ask_only) {
         return if (permission_mode == .auto)
@@ -1111,7 +1126,13 @@ fn resolveOrdinaryPermissionOutcome(
     if (permission_mode == .auto) {
         if (command_call) {
             const command = try runCommandContext(input, arena, call);
+            // A user-profile alias or function can redefine a routine name,
+            // so those commands go to review instead, as does every command
+            // while a failed capture hides which names are redefined.
             if (command.execution_mode == .captured and
+                !(command.environment == .user and
+                    (shell_snapshot.processOwner().definesAnyWord(command.command) or
+                        shell_snapshot.processOwner().startupNamesUnknown())) and
                 try command_effect.knownReversibleAutoCommand(
                     arena,
                     command.command,
@@ -1293,7 +1314,14 @@ fn requestPermissionOutcomeResolved(
     permission_mode: PermissionMode,
     local_grants: []const PermissionGrant,
 ) !command_admission.PermissionOutcome {
-    if (file_mutation_contract.isToolName(call.name)) {
+    if (file_mutation_contract.isToolName(call.name) and
+        // A host tool that reuses a reserved name executes through the host
+        // executor, not the builtin file mutation, so it follows the ordinary
+        // registered-tool permission path. A missing registry entry keeps the
+        // contract's own failure handling.
+        (input.tool_registry.lookup(call.name) == null or
+            input.tool_registry.lookup(call.name).?.executor_kind != .host))
+    {
         return requestFileMutationPermissionOutcome(
             input,
             arena,
@@ -1346,16 +1374,25 @@ fn requestPermissionOutcomeResolved(
             .yolo,
         ), vision_path_authority);
     }
+    // Detect startup-file edits before matching remembered shell approvals,
+    // so a refresh asks again instead of reusing an approval from before it.
+    const shell_grant_call = std.mem.eql(u8, permissions.permissionNameForTool(permission_name), "bash");
+    if (shell_grant_call) shell_snapshot.processOwner().checkStartupFiles();
+    // A reload changes what the command means, so earlier approvals do not
+    // cover it.
+    const grants_apply = !(shell_grant_call and shellCallRequestsReload(arena, call));
     var configured_ask = false;
     var all_targets_authorized_by_rule = true;
     var used_session_grant = false;
+    var grant_epoch: ?u64 = null;
     for (policy_targets) |target| {
         switch (try permissions.ruleDecisionFor(arena, input.permission_rules, input.workspace_root, permission_name, target.path, target_kind)) {
             .deny => return .{ .decision = .policy_denied },
             .allow => {},
             .ask => {
-                if (permissions.sessionGrantAllowed(local_grants, permission_name, target.path)) {
+                if (grants_apply and permissions.sessionGrantAllowed(local_grants, permission_name, target.path)) {
                     used_session_grant = true;
+                    if (shell_grant_call) grant_epoch = shell_snapshot.processOwner().shellGrantEpoch(target.path);
                     continue;
                 }
                 configured_ask = true;
@@ -1405,17 +1442,23 @@ fn requestPermissionOutcomeResolved(
     }
 
     if (all_targets_authorized_by_rule) {
-        return bindVisionPathExecutionAuthority(try permissionOutcomeForDecision(
+        return bindVisionPathExecutionAuthority(withShellGrantEpoch(try permissionOutcomeForDecision(
             input,
             arena,
             call,
             .once,
             if (used_session_grant) .session_grant else .configured_rule,
-        ), vision_path_authority);
+        ), grant_epoch), vision_path_authority);
     }
-    if (sessionGrantsAllowAll(local_grants, permission_name, policy_targets)) {
+    if (grants_apply and sessionGrantsAllowAll(local_grants, permission_name, policy_targets)) {
+        if (shell_grant_call and policy_targets.len > 0) {
+            grant_epoch = shell_snapshot.processOwner().shellGrantEpoch(policy_targets[0].path);
+        }
         return bindVisionPathExecutionAuthority(
-            try permissionOutcomeForDecision(input, arena, call, .once, .session_grant),
+            withShellGrantEpoch(
+                try permissionOutcomeForDecision(input, arena, call, .once, .session_grant),
+                grant_epoch,
+            ),
             vision_path_authority,
         );
     }
@@ -1902,6 +1945,32 @@ fn permissionOutcomeForDecision(
     return shellPermissionOutcome(command_ctx, decision, source);
 }
 
+/// Reports whether a shell call asks to reload the user's startup files.
+fn shellCallRequestsReload(arena: Allocator, call: ToolCall) bool {
+    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, call.arguments_json, .{}) catch return false;
+    if (value != .object) return false;
+    const request = value.object.get("request") orelse return false;
+    if (request != .object) return false;
+    const reload = request.object.get("reload") orelse return false;
+    return reload == .bool and reload.bool;
+}
+
+/// Binds the remembered grant's shell snapshot epoch to a shell admission.
+fn withShellGrantEpoch(
+    outcome: command_admission.PermissionOutcome,
+    grant_epoch: ?u64,
+) command_admission.PermissionOutcome {
+    var bound = outcome;
+    if (bound.execution_authority) |*authority| switch (authority.*) {
+        .run_command => |*command| switch (command.*) {
+            .shell_allowed => |*shell| shell.grant_epoch = grant_epoch,
+            .direct_only => {},
+        },
+        else => {},
+    };
+    return bound;
+}
+
 fn shellPermissionOutcome(
     command_ctx: command_admission.CommandContext,
     decision: ToolPermissionDecision,
@@ -2037,9 +2106,20 @@ fn defaultRunCommandPermissionOutcome(
             .decision = .once,
             .execution_authority = .{ .run_command = .{ .direct_only = fingerprint } },
         },
-        .approval_required => .{ .decision = .permission_required },
+        // Review cannot see a repository's git config, and the routine-command
+        // rule would run plain git, so an automatic git command that fx could
+        // not make safe does not run at all.
+        .approval_required => |reason| if (reason == .unsafe_git and permission_mode == .auto)
+            .{ .tool_failure = unsafe_git_hold_output }
+        else
+            .{ .decision = .permission_required },
     };
 }
+
+const unsafe_git_hold_output =
+    "fx did not run this git command. It could not run git here with every program this repository's config " ++
+    "names turned off, and plain git could start them. Inspect files with read_file, glob_files or grep_files, " ++
+    "or ask the user to run git themselves.";
 
 pub fn runCommandContext(
     input: Input,
@@ -2069,7 +2149,7 @@ pub fn runCommandContext(
     return .{
         .command = command,
         .resolved_cwd = cwd,
-        .target_os = builtin.os.tag,
+        .target_os = builtin.target.os.tag,
         .environment = environment_value,
         .execution_mode = execution_mode,
     };
@@ -2203,6 +2283,9 @@ pub fn preparePermissionStateAction(
         .access_scope = input.access_scope,
     })) {
         .prepared => |prepared| prepared,
+        // A host tool that reuses a reserved name never reaches this site
+        // through the file-mutation contract; treat it as unpreparable.
+        .not_file_mutation => return error.PermissionStatePreparationFailed,
         .tool_failure => return error.PermissionStatePreparationFailed,
     };
     defer prepared_call.deinit(arena);
@@ -2276,8 +2359,7 @@ fn filePermissionStateDisplay(
     std.crypto.hash.sha2.Sha256.hash(prepared.after_content, &after_hash, .{});
     const after_hex = std.fmt.bytesToHex(after_hash[0..8].*, .lower);
     return switch (prepared.preimage) {
-        .absent => try std.fmt.allocPrint(
-            arena,
+        .absent => try arena.print(
             "{s} {s} preimage=absent after={s}",
             .{ prepared.tool_name, prepared.display_path, &after_hex },
         ),
@@ -2286,8 +2368,7 @@ fn filePermissionStateDisplay(
                 preimage.content_hash[0..8].*,
                 .lower,
             );
-            break :blk try std.fmt.allocPrint(
-                arena,
+            break :blk try arena.print(
                 "{s} {s} preimage={s} after={s}",
                 .{ prepared.tool_name, prepared.display_path, &before_hex, &after_hex },
             );
@@ -2412,14 +2493,14 @@ pub fn permissionTargetResolutionFailureMessage(
     const path_arg = try targetPathForFailureMessage(arena, call);
     if (reason) |text| {
         return if (path_arg) |path|
-            try std.fmt.allocPrint(arena, "{s}: {s}", .{ text, path })
+            try arena.print("{s}: {s}", .{ text, path })
         else
             try arena.dupe(u8, text);
     }
     return if (path_arg) |path|
-        try std.fmt.allocPrint(arena, "Cannot resolve path \"{s}\": {s}", .{ path, @errorName(err) })
+        try arena.print("Cannot resolve path \"{s}\": {s}", .{ path, @errorName(err) })
     else
-        try std.fmt.allocPrint(arena, "Cannot resolve tool target path: {s}", .{@errorName(err)});
+        try arena.print("Cannot resolve tool target path: {s}", .{@errorName(err)});
 }
 
 /// Best-effort extraction of the path the caller asked for, so the failure
@@ -2469,6 +2550,14 @@ fn permissionTargetsForCall(input: Input, arena: Allocator, call: ToolCall) !per
         };
         return .{ .items = items };
     }
+    // A host tool that reuses a reserved file-mutation name has no typed
+    // mutation target; its permission target is its own name.
+    if (tool.executor_kind == .host) {
+        const items = try arena.alloc(permissions.PermissionCallTarget, 1);
+        errdefer arena.free(items);
+        items[0] = .{ .role = "target", .path = try arena.dupe(u8, call.name) };
+        return .{ .items = items };
+    }
     var permission_call = call;
     if (std.mem.eql(u8, permission_call.name, "shell")) {
         permission_call.name = "shell";
@@ -2491,8 +2580,7 @@ fn commandPermissionTarget(
         arena,
         context,
     );
-    return std.fmt.allocPrint(
-        arena,
+    return arena.print(
         "{s}::{s}",
         .{ context.resolved_cwd, identity },
     );
@@ -2512,6 +2600,9 @@ pub fn permissionTargetForCall(input: Input, arena: Allocator, call: ToolCall) !
     if (try isRunCommandCall(input, arena, call)) {
         return commandPermissionTarget(input, arena, call);
     }
+    // A host tool that reuses a reserved file-mutation name has no typed
+    // mutation target; its permission target is its own name.
+    if (tool.executor_kind == .host) return arena.dupe(u8, call.name);
     return permissions.permissionTargetForCallInScope(
         arena,
         accessScope(input),
@@ -2792,8 +2883,8 @@ test "interactive command approval keeps dangerous-command guidance" {
         .arguments_json = "{\"action\":\"run\",\"command\":\"git reset --hard\"}",
     }, null);
 
-    try std.testing.expect(std.mem.indexOf(u8, request.label, "risk: command may discard version-control state") != null);
-    try std.testing.expect(std.mem.indexOf(u8, request.label, "safer: inspect git status first") != null);
+    try std.testing.expect(std.mem.find(u8, request.label, "risk: command may discard version-control state") != null);
+    try std.testing.expect(std.mem.find(u8, request.label, "safer: inspect git status first") != null);
 }
 
 test "interactive Vision path approval names every canonical image" {
@@ -2835,7 +2926,7 @@ test "interactive Vision path approval names every canonical image" {
         .ask,
         &.{},
     );
-    const expected = try std.fmt.allocPrint(alloc, "vision {s}, {s}", .{ first, second });
+    const expected = try alloc.print("vision {s}, {s}", .{ first, second });
     defer alloc.free(expected);
     try std.testing.expectEqualStrings(expected, recording.last_label.?);
     const authority = switch (outcome.execution_authority orelse
@@ -3135,11 +3226,12 @@ test "prepared file mutation admission decodes and resolves exactly once without
         .workspace_root = workspace,
     })) {
         .tool_failure => return error.TestExpectedPreparedFileMutation,
+        .not_file_mutation => return error.TestExpectedPreparedFileMutation,
         .prepared => |value| value,
     };
     defer prepared.deinit(arena);
 
-    const expected_target = try std.fs.path.join(arena, &.{ workspace, "nested", "file.txt" });
+    const expected_target = try std.Io.Dir.path.join(arena, &.{ workspace, "nested", "file.txt" });
     try std.testing.expectEqualStrings(expected_target, prepared.targetPath());
     try std.testing.expect(prepared.targets.proofValid());
     try std.testing.expectEqual(@as(usize, 1), file_mutation_decode_count);
@@ -3178,12 +3270,11 @@ test "external file action identity is canonical across call IDs and distinguish
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const absolute_target = try std.fs.path.join(
+    const absolute_target = try std.Io.Dir.path.join(
         arena,
         &.{ external, "denied", "nested", "file.txt" },
     );
-    const absolute_arguments = try std.fmt.allocPrint(
-        arena,
+    const absolute_arguments = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"denied\\n\"}}",
         .{absolute_target},
     );
@@ -3201,6 +3292,7 @@ test "external file action identity is canonical across call IDs and distinguish
         .workspace_root = workspace,
     })) {
         .tool_failure => return error.TestExpectedPreparedFileMutation,
+        .not_file_mutation => return error.TestExpectedPreparedFileMutation,
         .prepared => |value| value,
     };
     defer first.deinit(arena);
@@ -3213,6 +3305,7 @@ test "external file action identity is canonical across call IDs and distinguish
         .workspace_root = workspace,
     })) {
         .tool_failure => return error.TestExpectedPreparedFileMutation,
+        .not_file_mutation => return error.TestExpectedPreparedFileMutation,
         .prepared => |value| value,
     };
     defer equivalent.deinit(arena);
@@ -3225,6 +3318,7 @@ test "external file action identity is canonical across call IDs and distinguish
         .workspace_root = workspace,
     })) {
         .tool_failure => return error.TestExpectedPreparedFileMutation,
+        .not_file_mutation => return error.TestExpectedPreparedFileMutation,
         .prepared => |value| value,
     };
     defer changed.deinit(arena);
@@ -3241,7 +3335,7 @@ test "external file action identity is canonical across call IDs and distinguish
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(
             std.testing.io,
-            try std.fs.path.join(arena, &.{ external, "denied" }),
+            try std.Io.Dir.path.join(arena, &.{ external, "denied" }),
             .{},
         ),
     );
@@ -3271,6 +3365,7 @@ test "prepared file mutation rejects a changed call without decoding or resolvin
         .workspace_root = workspace,
     })) {
         .tool_failure => return error.TestExpectedPreparedFileMutation,
+        .not_file_mutation => return error.TestExpectedPreparedFileMutation,
         .prepared => |value| value,
     };
     defer prepared.deinit(arena);
@@ -3336,6 +3431,7 @@ test "file mutation preparation returns semantic failures before permission eval
     });
     const reason = switch (missing_edit) {
         .tool_failure => |value| value,
+        .not_file_mutation => return error.TestExpectedToolFailure,
         .prepared => return error.TestExpectedToolFailure,
     };
     try std.testing.expectEqualStrings(
@@ -3356,6 +3452,7 @@ fn checkFileMutationPreparationAllocationFailures(alloc: Allocator, workspace: [
         .workspace_root = workspace,
     })) {
         .tool_failure => return error.TestExpectedPreparedFileMutation,
+        .not_file_mutation => return error.TestExpectedPreparedFileMutation,
         .prepared => |value| value,
     };
     defer prepared.deinit(alloc);
@@ -3370,7 +3467,7 @@ test "prepared file mutation cleans every partial allocation failure" {
     defer alloc.free(workspace);
 
     try std.testing.checkAllAllocationFailures(
-        alloc,
+        testing_allocator.no_resize,
         checkFileMutationPreparationAllocationFailures,
         .{workspace},
     );
@@ -3544,6 +3641,7 @@ test "file mutation kind comes from the registered executor kind, not the tool n
             file_mutation_contract.Kind.edit,
             std.meta.activeTag(input),
         ),
+        .not_file_mutation => return error.TestExpectedDecodedInput,
         .failure => return error.TestExpectedDecodedInput,
     }
 }
@@ -3567,8 +3665,78 @@ test "file mutation decode accepts a registered tool under any name" {
             file_mutation_contract.Kind.write,
             std.meta.activeTag(input),
         ),
+        .not_file_mutation => return error.TestExpectedDecodedInput,
         .failure => return error.TestExpectedDecodedInput,
     }
+}
+
+test "file mutation decode steps aside for a host tool reusing a reserved name" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const HostRaw = struct {
+        json: []u8,
+    };
+    const Hooks = struct {
+        fn deinit(raw: *anyopaque, alloc: Allocator) void {
+            const input: *HostRaw = @ptrCast(@alignCast(raw));
+            alloc.free(input.json);
+            alloc.destroy(input);
+        }
+        fn decode(
+            ctx: tool_dispatch.DispatchContext,
+            arguments_json: []const u8,
+        ) tool_dispatch.DispatchError!tool_dispatch.DecodeResult {
+            const input = try ctx.allocator.create(HostRaw);
+            errdefer ctx.allocator.destroy(input);
+            input.* = .{ .json = try ctx.allocator.dupe(u8, arguments_json) };
+            return .{ .input = .{ .ptr = input, .deinit_fn = deinit } };
+        }
+        fn call(
+            _: tool_dispatch.DispatchContext,
+            _: tool_dispatch.ToolInput,
+        ) tool_dispatch.DispatchError!tool_dispatch.ToolResult {
+            return error.InvalidToolArguments;
+        }
+        fn readsOnly(_: tool_dispatch.ToolInput) bool {
+            return false;
+        }
+        fn irreversible(_: tool_dispatch.ToolInput) bool {
+            return false;
+        }
+    };
+
+    // A host tool registered under the reserved name must not enter the
+    // builtin mutation contract at all.
+    const host_tool = tool_dispatch.Tool{
+        .name = "write_file",
+        .description = "",
+        .model_schema = .{ .name = "write_file", .description = "" },
+        .model_visible = false,
+        .executor_kind = .host,
+        .activity_kind = .command,
+        .action_label = "Running",
+        .completed_action_label = "Ran",
+        .decode = Hooks.decode,
+        .call = Hooks.call,
+        .reads_only_fn = Hooks.readsOnly,
+        .irreversible_fn = Hooks.irreversible,
+    };
+    const tools = [_]tool_dispatch.Tool{host_tool};
+    const decoded = try decodeFileMutationInput(arena, .{ .tools = tools[0..] }, .{
+        .id = "host-write",
+        .name = "write_file",
+        .arguments_json = "{\"path\":\"note.txt\",\"content\":\"hi\"}",
+    });
+    try std.testing.expect(decoded == .not_file_mutation);
+
+    const prepared = try prepareFileMutationCall(arena, .{
+        .id = "host-write",
+        .name = "write_file",
+        .arguments_json = "{\"path\":\"note.txt\",\"content\":\"hi\"}",
+    }, .{ .tool_registry = .{ .tools = tools[0..] }, .workspace_root = "/tmp" });
+    try std.testing.expect(prepared == .not_file_mutation);
 }
 
 test "file mutation decode rejects a registered tool that is not a mutation" {
@@ -3584,6 +3752,7 @@ test "file mutation decode rejects a registered tool that is not a mutation" {
     });
     const reason = switch (decoded) {
         .failure => |value| value,
+        .not_file_mutation => return error.TestExpectedToolFailure,
         .input => return error.TestExpectedToolFailure,
     };
     try std.testing.expectEqualStrings("unsupported file mutation tool", reason);
@@ -3868,8 +4037,7 @@ test "interactive file admission passes its canonical grant offer to the prompte
     );
     input.workspace_root = workspace;
     input.permission_prompter = recording.prompter();
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}/note.txt\",\"content\":\"hello\\n\"}}",
         .{workspace},
     );
@@ -4022,7 +4190,7 @@ test "automatic review trace preserves the typed unavailable cause without actio
     defer tmp.cleanup();
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(root);
-    const trace_path = try std.fs.path.join(alloc, &.{ root, "permission.log" });
+    const trace_path = try std.Io.Dir.path.join(alloc, &.{ root, "permission.log" });
     defer alloc.free(trace_path);
 
     debug_trace.resetForTest();
@@ -4482,9 +4650,8 @@ test "yolo file admission preserves canonical mutation authority" {
         },
     };
     input.permission_rules = .{ .rules = &rules };
-    const target = try std.fs.path.join(arena, &.{ workspace, "yolo.txt" });
-    const arguments = try std.fmt.allocPrint(
-        arena,
+    const target = try std.Io.Dir.path.join(arena, &.{ workspace, "yolo.txt" });
+    const arguments = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"ok\\n\"}}",
         .{target},
     );
@@ -4656,11 +4823,11 @@ test "live authority resolves a missing read target without changing ordinary ad
     try tmp.dir.createDirPath(io_mod.getIo(), "workspace/src");
     const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(workspace);
-    const expected = try std.fs.path.join(alloc, &.{ workspace, "src/missing.zig" });
+    const expected = try std.Io.Dir.path.join(alloc, &.{ workspace, "src/missing.zig" });
     defer alloc.free(expected);
     const external_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
     defer alloc.free(external_root);
-    const external_expected = try std.fs.path.join(
+    const external_expected = try std.Io.Dir.path.join(
         alloc,
         &.{ external_root, "external-missing.zig" },
     );
@@ -4702,8 +4869,7 @@ test "live authority resolves a missing read target without changing ordinary ad
             .{
                 .id = "external-missing-read",
                 .name = "read_file",
-                .arguments_json = try std.fmt.allocPrint(
-                    arena_state.allocator(),
+                .arguments_json = try arena_state.allocator().print(
                     "{{\"path\":\"{s}\"}}",
                     .{external_expected},
                 ),
@@ -4721,7 +4887,7 @@ test "live authority preserves a non-directory read failure for tool execution" 
     blocking_file.close(io_mod.getIo());
     const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(workspace);
-    const expected = try std.fs.path.join(alloc, &.{ workspace, "not-a-dir/child.txt" });
+    const expected = try std.Io.Dir.path.join(alloc, &.{ workspace, "not-a-dir/child.txt" });
     defer alloc.free(expected);
 
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -5019,8 +5185,7 @@ test "delegated command effects remain reviewer owned" {
         "git rm -hf tracked.txt",
         "git reset -hq --hard",
     }) |command| {
-        const arguments_json = try std.fmt.allocPrint(
-            arena_state.allocator(),
+        const arguments_json = try arena_state.allocator().print(
             "{{\"action\":\"run\",\"command\":{f}}}",
             .{std.json.fmt(command, .{})},
         );
@@ -5469,7 +5634,103 @@ test "TTY admission fingerprints route and explicit shell startup" {
     ));
 }
 
+fn npmAliasSnapshotCapture(request: shell_snapshot.CaptureRequest) shell_snapshot.CaptureOutcome {
+    const generation = shell_snapshot.Generation.create() catch return .{ .failed = .out_of_memory };
+    const alloc = generation.arena.allocator();
+    generation.shell_path = alloc.dupe(u8, request.shell_path) catch {
+        generation.destroy();
+        return .{ .failed = .out_of_memory };
+    };
+    generation.names.put(alloc, "npm", {}) catch {
+        generation.destroy();
+        return .{ .failed = .out_of_memory };
+    };
+    return .{ .ready = generation };
+}
+
+test "routine commands that a user alias or function redefines go to review" {
+    shell_snapshot.resetProcessOwnerForTest(npmAliasSnapshotCapture);
+    defer shell_snapshot.resetProcessOwnerForTest(shell_snapshot.real_capture_fn);
+    const lease = (try shell_snapshot.processOwner().acquire("/bin/zsh", "/tmp", .{})).snapshot;
+    lease.release();
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{};
+    const input = testInputWithClassifier(
+        &worker,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    const redefined = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{ .id = "aliased", .name = "shell", .arguments_json = "{\"action\":\"run\",\"command\":\"npm install 2>&1\"}" },
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(
+        command_admission.ShellAuthorizationSource.auto_classifier,
+        redefined.execution_authority.?.run_command.shell_allowed.source,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+
+    const routine = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{ .id = "routine", .name = "shell", .arguments_json = "{\"action\":\"run\",\"command\":\"git status --short\"}" },
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(
+        command_admission.ShellAuthorizationSource.auto_mode,
+        routine.execution_authority.?.run_command.shell_allowed.source,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
+fn failedSnapshotCapture(_: shell_snapshot.CaptureRequest) shell_snapshot.CaptureOutcome {
+    return .{ .failed = .too_large };
+}
+
+test "routine commands go to review while the snapshot has fallen back" {
+    shell_snapshot.resetProcessOwnerForTest(failedSnapshotCapture);
+    defer shell_snapshot.resetProcessOwnerForTest(shell_snapshot.real_capture_fn);
+    try std.testing.expect((try shell_snapshot.processOwner().acquire("/bin/zsh", "/tmp", .{})) == .full_startup);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{};
+    const input = testInputWithClassifier(
+        &worker,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    const outcome = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{ .id = "fallback", .name = "shell", .arguments_json = "{\"action\":\"run\",\"command\":\"git status --short\"}" },
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(
+        command_admission.ShellAuthorizationSource.auto_classifier,
+        outcome.execution_authority.?.run_command.shell_allowed.source,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
 test "known reversible auto commands bypass the reviewer" {
+    // An earlier test's snapshot could redefine a routine name.
+    shell_snapshot.resetProcessOwnerForTest(shell_snapshot.real_capture_fn);
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
@@ -5490,8 +5751,7 @@ test "known reversible auto commands bypass the reviewer" {
         "npm run dev",
         "zig build test",
     }) |command| {
-        const arguments = try std.fmt.allocPrint(
-            arena_state.allocator(),
+        const arguments = try arena_state.allocator().print(
             "{{\"action\":\"run\",\"command\":{f}}}",
             .{std.json.fmt(command, .{})},
         );
@@ -5526,6 +5786,53 @@ test "known reversible auto commands bypass the reviewer" {
         command_admission.ShellAuthorizationSource.auto_classifier,
         tty.execution_authority.?.run_command.shell_allowed.source,
     );
+}
+
+test "automatic git that safe git refuses is held instead of running plain git" {
+    shell_snapshot.resetProcessOwnerForTest(shell_snapshot.real_capture_fn);
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The repository config includes a file through a symlink, which fx's
+    // config reader refuses, so safe git cannot prepare and no git starts.
+    try tmp.dir.createDirPath(std.testing.io, "workspace/.git/objects");
+    try tmp.dir.createDirPath(std.testing.io, "workspace/.git/refs");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace/.git/HEAD", .data = "ref: refs/heads/main\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fsmonitor.inc", .data = "[core]\n\tfsmonitor = /bin/sh\n" });
+    const include_target = try io_mod.dirRealpathAlloc(arena, tmp.dir, "fsmonitor.inc");
+    try tmp.dir.symLink(std.testing.io, include_target, "workspace/.git/fsmonitor.inc", .{ .is_directory = false });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "workspace/.git/config", .data = "[include]\n\tpath = fsmonitor.inc\n" });
+
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{};
+    var input = testInputWithClassifier(
+        &worker,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    input.workspace_root = try io_mod.dirRealpathAlloc(arena, tmp.dir, "workspace");
+
+    for ([_][]const u8{ "git status", "git status --short --branch", "git diff" }) |command| {
+        const arguments = try arena.print(
+            "{{\"action\":\"run\",\"command\":{f},\"profile\":\"clean\"}}",
+            .{std.json.fmt(command, .{})},
+        );
+        const call: ToolCall = .{ .id = "refused-git", .name = "shell", .arguments_json = arguments };
+        const held = try requestPermissionOutcome(input, arena, call, .auto, &.{});
+        try std.testing.expect(held.execution_authority == null);
+        try std.testing.expectEqualStrings(unsafe_git_hold_output, held.tool_failure.?);
+
+        // Ask mode keeps the normal approval prompt for the exact command.
+        const asked = try requestPermissionOutcome(input, arena, call, .ask, &.{});
+        try std.testing.expect(asked.tool_failure == null);
+        try std.testing.expectEqual(ToolPermissionDecision.permission_required, asked.decision);
+    }
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
 }
 
 test "session deny narrows configured command allow" {
@@ -5830,7 +6137,7 @@ test "external prepared file review carries frozen path and diff authority" {
         ),
     );
     input.workspace_root = workspace;
-    const target_path = try std.fs.path.join(
+    const target_path = try std.Io.Dir.path.join(
         arena,
         &.{ external, "desktop-test.txt" },
     );
@@ -5843,8 +6150,7 @@ test "external prepared file review carries frozen path and diff authority" {
         defer existing.close(io_mod.getIo());
         try existing.writeStreamingAll(io_mod.getIo(), "before\n");
     }
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
         .{target_path},
     );
@@ -5918,9 +6224,8 @@ test "automatic workspace write uses reversible admission without reviewer" {
         ),
     );
     input.workspace_root = workspace;
-    const target_path = try std.fs.path.join(arena, &.{ workspace, "note.txt" });
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const target_path = try std.Io.Dir.path.join(arena, &.{ workspace, "note.txt" });
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
         .{target_path},
     );
@@ -5948,9 +6253,8 @@ test "automatic workspace write uses reversible admission without reviewer" {
     try std.testing.expect(authorization.prepared != null);
     try std.testing.expectEqualStrings(target_path, authorization.input.path());
 
-    const edit_target = try std.fs.path.join(arena, &.{ workspace, "editable.txt" });
-    const edit_arguments = try std.fmt.allocPrint(
-        arena,
+    const edit_target = try std.Io.Dir.path.join(arena, &.{ workspace, "editable.txt" });
+    const edit_arguments = try arena.print(
         "{{\"path\":\"{s}\",\"old_string\":\"before\",\"new_string\":\"after\"}}",
         .{edit_target},
     );
@@ -6019,9 +6323,8 @@ test "automatic added-root write bypasses reviewer while untrusted external writ
         .{ .id = "external-write", .root = external, .expected_review_calls = 0 },
     };
     for (cases) |case| {
-        const target_path = try std.fs.path.join(arena, &.{ case.root, "note.txt" });
-        const arguments_json = try std.fmt.allocPrint(
-            arena,
+        const target_path = try std.Io.Dir.path.join(arena, &.{ case.root, "note.txt" });
+        const arguments_json = try arena.print(
             "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
             .{target_path},
         );
@@ -6076,9 +6379,8 @@ test "automatic trusted-root write keeps persistence targets on reviewer path" {
         "Library/LaunchAgents/com.fx.smoke.plist",
     };
     for (relative_targets, 0..) |relative_target, index| {
-        const target_path = try std.fs.path.join(arena, &.{ workspace, relative_target });
-        const arguments_json = try std.fmt.allocPrint(
-            arena,
+        const target_path = try std.Io.Dir.path.join(arena, &.{ workspace, relative_target });
+        const arguments_json = try arena.print(
             "{{\"path\":\"{s}\",\"content\":\"test\\n\"}}",
             .{target_path},
         );
@@ -6133,9 +6435,8 @@ test "automatic trusted-root overwrite preserves configured read disclosure revi
         .action = .deny,
     }};
     input.permission_rules = .{ .rules = &rules };
-    const target_path = try std.fs.path.join(arena, &.{ workspace, "secret.txt" });
-    const arguments_json = try std.fmt.allocPrint(
-        arena,
+    const target_path = try std.Io.Dir.path.join(arena, &.{ workspace, "secret.txt" });
+    const arguments_json = try arena.print(
         "{{\"path\":\"{s}\",\"content\":\"after\\n\"}}",
         .{target_path},
     );

@@ -5,6 +5,7 @@ const tool_result_limits = @import("../../tooling/tool_result_limits.zig");
 const session_child_store = @import("../../session/session_child_store.zig");
 const command_replay_store = @import("../../session/command_replay_store.zig");
 const context_limits = @import("../../config/context_limits.zig");
+const compactor = @import("../../compactor/compactor.zig");
 const workspace_access = @import("../../workspace/workspace_access.zig");
 const model_response_recovery = @import("model_response_recovery.zig");
 const provider_set = @import("../../gateway/provider_set.zig");
@@ -43,11 +44,21 @@ pub const Config = struct {
     custom_tool_guidance: []const u8 = "",
     agent_step_limit: usize,
     max_tool_result_bytes: usize = tool_result_limits.default_max_tool_result_bytes,
+    /// Share of the model's usable input at which automatic compaction starts.
+    auto_compact_percent: u8 = compactor.default_percent,
     step_limit_notice: []const u8 = default_step_limit_notice,
     cancel_flag: *std.atomic.Value(bool),
     review_enabled: bool = false,
     fast_mode: bool = false,
+    ultrafast_mode: bool = false,
     effort: ReasoningEffort = .auto,
+    /// Borrowed gateway provider slugs in preference order; empty leaves
+    /// routing to the gateway. Backing memory is owned by the caller and must
+    /// outlive every request built from this config.
+    provider_order: []const []const u8 = &.{},
+    /// Sends `provider_order` as the gateway's hard `only` restriction instead
+    /// of its `order` preference.
+    provider_strict: bool = false,
     first_call_tool_choice: types.ToolChoice = .auto,
     workspace_root: []const u8 = "",
     access_scope: ?workspace_access.AccessScope = null,

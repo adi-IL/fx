@@ -3,6 +3,7 @@ const legacy_elicitation_runtime = @import("legacy_elicitation_runtime.zig");
 const std = @import("std");
 const server_connection = @import("server_connection.zig");
 const io_mod = @import("../shared/io.zig");
+const mem_utils = @import("../shared/mem_utils.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const server_auth = @import("server_auth.zig");
 const server_subscriptions = @import("server_subscriptions.zig");
@@ -53,15 +54,15 @@ const operationDeadline = server_connection.operationDeadline;
 const Context = feature_catalog_runtime.Operations;
 fn cloneResourceSummary(alloc: Allocator, server_name: []const u8, resource: resources_feature.Descriptor) !ResourceSummary {
     const owned_server = try alloc.dupe(u8, server_name);
-    errdefer alloc.free(owned_server);
+    errdefer mem_utils.free(alloc, owned_server);
     const uri = try alloc.dupe(u8, resource.uri);
-    errdefer alloc.free(uri);
+    errdefer mem_utils.free(alloc, uri);
     const name = try alloc.dupe(u8, resource.name);
-    errdefer alloc.free(name);
+    errdefer mem_utils.free(alloc, name);
     const title = if (resource.title) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (title) |value| alloc.free(value);
+    errdefer if (title) |value| mem_utils.free(alloc, value);
     const description = if (resource.description) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (description) |value| alloc.free(value);
+    errdefer if (description) |value| mem_utils.free(alloc, value);
     const mime_type = if (resource.mime_type) |value| try alloc.dupe(u8, value) else null;
     return .{
         .server_name = owned_server,
@@ -75,15 +76,15 @@ fn cloneResourceSummary(alloc: Allocator, server_name: []const u8, resource: res
 
 fn cloneTemplateSummary(alloc: Allocator, server_name: []const u8, template: resources_feature.Template) !ResourceSummary {
     const owned_server = try alloc.dupe(u8, server_name);
-    errdefer alloc.free(owned_server);
+    errdefer mem_utils.free(alloc, owned_server);
     const uri = try alloc.dupe(u8, template.uri_template);
-    errdefer alloc.free(uri);
+    errdefer mem_utils.free(alloc, uri);
     const name = try alloc.dupe(u8, template.name);
-    errdefer alloc.free(name);
+    errdefer mem_utils.free(alloc, name);
     const title = if (template.title) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (title) |value| alloc.free(value);
+    errdefer if (title) |value| mem_utils.free(alloc, value);
     const description = if (template.description) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (description) |value| alloc.free(value);
+    errdefer if (description) |value| mem_utils.free(alloc, value);
     const mime_type = if (template.mime_type) |value| try alloc.dupe(u8, value) else null;
     return .{
         .server_name = owned_server,
@@ -98,22 +99,22 @@ fn cloneTemplateSummary(alloc: Allocator, server_name: []const u8, template: res
 
 fn clonePromptSummary(alloc: Allocator, server_name: []const u8, prompt: prompts_feature.Prompt) !PromptSummary {
     const owned_server = try alloc.dupe(u8, server_name);
-    errdefer alloc.free(owned_server);
+    errdefer mem_utils.free(alloc, owned_server);
     const name = try alloc.dupe(u8, prompt.name);
-    errdefer alloc.free(name);
+    errdefer mem_utils.free(alloc, name);
     const title = if (prompt.title) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (title) |value| alloc.free(value);
+    errdefer if (title) |value| mem_utils.free(alloc, value);
     const description = if (prompt.description) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (description) |value| alloc.free(value);
+    errdefer if (description) |value| mem_utils.free(alloc, value);
     const arguments = try alloc.alloc(prompts_feature.Argument, prompt.arguments.len);
     var count: usize = 0;
     errdefer {
         for (arguments[0..count]) |*argument| argument.deinit(alloc);
-        alloc.free(arguments);
+        mem_utils.free(alloc, arguments);
     }
     for (prompt.arguments, 0..) |argument, index| {
         const argument_name = try alloc.dupe(u8, argument.name);
-        errdefer alloc.free(argument_name);
+        errdefer mem_utils.free(alloc, argument_name);
         const argument_description = if (argument.description) |value| try alloc.dupe(u8, value) else null;
         arguments[index] = .{
             .name = argument_name,
@@ -337,7 +338,7 @@ fn appendUniqueOwnedUri(
         if (std.mem.eql(u8, candidate, uri)) return;
     }
     const owned = try alloc.dupe(u8, uri);
-    errdefer alloc.free(owned);
+    errdefer mem_utils.free(alloc, owned);
     try uris.append(alloc, owned);
 }
 
@@ -357,9 +358,9 @@ fn cloneCachedResourceRead(
     result: resources_feature.ReadResult,
 ) !ResourceReadResult {
     const owned_server = try alloc.dupe(u8, server_name);
-    errdefer alloc.free(owned_server);
+    errdefer mem_utils.free(alloc, owned_server);
     const owned_uri = try alloc.dupe(u8, uri);
-    errdefer alloc.free(owned_uri);
+    errdefer mem_utils.free(alloc, owned_uri);
     const contents = try cloneResourceContents(alloc, result.contents);
     return .{ .server_name = owned_server, .uri = owned_uri, .contents = contents };
 }
@@ -372,17 +373,17 @@ fn cloneResourceContents(
     var count: usize = 0;
     errdefer {
         for (contents[0..count]) |*content| content.deinit(alloc);
-        alloc.free(contents);
+        mem_utils.free(alloc, contents);
     }
     for (source, 0..) |content, index| {
         const uri = try alloc.dupe(u8, content.uri);
-        errdefer alloc.free(uri);
+        errdefer mem_utils.free(alloc, uri);
         const mime_type = if (content.mime_type) |value| try alloc.dupe(u8, value) else null;
-        errdefer if (mime_type) |value| alloc.free(value);
+        errdefer if (mime_type) |value| mem_utils.free(alloc, value);
         const annotations_json = if (content.annotations_json) |value| try alloc.dupe(u8, value) else null;
-        errdefer if (annotations_json) |value| alloc.free(value);
+        errdefer if (annotations_json) |value| mem_utils.free(alloc, value);
         const metadata_json = if (content.metadata_json) |value| try alloc.dupe(u8, value) else null;
-        errdefer if (metadata_json) |value| alloc.free(value);
+        errdefer if (metadata_json) |value| mem_utils.free(alloc, value);
         const data: resources_feature.ResourceData = switch (content.data) {
             .text => |value| .{ .text = try alloc.dupe(u8, value) },
             .blob => |value| .{ .blob = try alloc.dupe(u8, value) },
@@ -584,105 +585,47 @@ fn requestResourceReadRound(
         },
     );
     defer outcome.deinit(alloc);
-    switch (outcome) {
-        .complete => |*complete| {
-            response.finishLegacy(self.transport.alloc, .completed);
-            const result = complete.*;
-            complete.contents = &.{};
-            return .{
-                .result = result,
-                .auth_identity = response.auth_identity,
-                .received_at_ms = received_at_ms,
-            };
-        },
-        .protocol_failure => |failure| {
-            if (round >= 8) return error.McpInputRequiredLimitExceeded;
-            if (try respondToLegacyUrlRequired(
-                self,
-                alloc,
-                server,
-                snapshot,
-                .{ .resources_read = uri },
-                failure.code,
-                failure.data_json,
-                options,
-                round,
-            )) |handled| {
-                if (handled.decision != .retry) {
-                    handled.responder.finish(alloc, handled.origin, .abandoned);
-                    return error.McpInputRequired;
-                }
-                const continued = requestResourceReadRound(
-                    self,
-                    alloc,
-                    server,
-                    snapshot,
-                    uri,
-                    operationDeadline(server),
-                    options,
-                    null,
-                    null,
-                    round + 1,
-                ) catch |err| {
-                    handled.responder.finish(alloc, handled.origin, .abandoned);
-                    return err;
+    var continuation = try prepareFeatureContinuation(
+        self,
+        alloc,
+        server,
+        snapshot,
+        .{ .resources_read = uri },
+        options,
+        round,
+        switch (outcome) {
+            .complete => |*complete| {
+                response.finishLegacy(self.transport.alloc, .completed);
+                const result = complete.*;
+                complete.contents = &.{};
+                return .{
+                    .result = result,
+                    .auth_identity = response.auth_identity,
+                    .received_at_ms = received_at_ms,
                 };
-                handled.responder.finish(alloc, handled.origin, .completed);
-                return continued;
-            }
-            try retainFeatureProtocolDiagnostic(alloc, options, failure);
-            return error.McpProtocolError;
+            },
+            .protocol_failure => |*failure| .{ .protocol_failure = failure },
+            .input_required => |*required| .{ .input_required = required },
         },
-        .input_required => |*required| {
-            if (round >= 8) return error.McpInputRequiredLimitExceeded;
-            const responder = options.input_responder orelse return error.McpInputRequired;
-            const requests_json = try mrtr.renderRequests(alloc, required.requests);
-            defer alloc.free(requests_json);
-            const compatibility = tool_mcp_runtime.InputRequired{
-                .input_requests_json = requests_json,
-                .request_state_json = required.request_state_json,
-            };
-            const interaction_deadline = operation_control.elicitationDeadline(io_mod.getIo());
-            const origin = tool_mcp_runtime.InputOrigin{
-                .wire = .modern_mcp,
-                .server_name = snapshot.server_name,
-                .operation = .{ .resources_read = uri },
-                .runtime_generation = self.transport.completions.runtime_generation,
-                .connection_generation = snapshot.connection_generation,
-                .client_generation = snapshot.connection_generation,
-                .catalog_generation = snapshot.catalog_generation,
-                .request_generation = round + 1,
-                .auth_generation = server.auth_generation.load(.acquire),
-                .deadline_ms = operation_control.timestampMillis(interaction_deadline),
-                .lifecycle_cancel_flag = server.cancellation(),
-            };
-            const responses = try responder.callback(
-                responder.context,
-                alloc,
-                origin,
-                compatibility,
-            );
-            defer alloc.free(responses);
-            try mrtr.validateResponses(alloc, required.requests, responses, .{});
-            const continued = requestResourceReadRound(
-                self,
-                alloc,
-                server,
-                snapshot,
-                uri,
-                operationDeadline(server),
-                options,
-                responses,
-                required.request_state_json,
-                round + 1,
-            ) catch |err| {
-                responder.finish(alloc, origin, .abandoned);
-                return err;
-            };
-            responder.finish(alloc, origin, .completed);
-            return continued;
-        },
-    }
+    );
+    defer continuation.deinit(alloc);
+    const continued = requestResourceReadRound(
+        self,
+        alloc,
+        server,
+        snapshot,
+        uri,
+        operationDeadline(server),
+        options,
+        continuation.input_responses_json,
+        continuation.request_state_json,
+        round + 1,
+    ) catch |err| {
+        continuation.finish(alloc, .abandoned);
+        return err;
+    };
+    continuation.finish(alloc, .completed);
+    return continued;
 }
 
 fn requestPromptGet(
@@ -740,55 +683,109 @@ fn requestPromptGetRound(
     defer response.deinit(self.transport.alloc);
     var outcome = try prompts_feature.parseGetOutcome(alloc, response.body, serverFeatureProtocol(server), .{});
     defer outcome.deinit(alloc);
-    switch (outcome) {
-        .complete => |*complete| {
-            response.finishLegacy(self.transport.alloc, .completed);
-            const result = complete.*;
-            complete.description = null;
-            complete.messages = &.{};
-            return result;
+    var continuation = try prepareFeatureContinuation(
+        self,
+        alloc,
+        server,
+        snapshot,
+        .{ .prompts_get = name },
+        options,
+        round,
+        switch (outcome) {
+            .complete => |*complete| {
+                response.finishLegacy(self.transport.alloc, .completed);
+                const result = complete.*;
+                complete.description = null;
+                complete.messages = &.{};
+                return result;
+            },
+            .protocol_failure => |*failure| .{ .protocol_failure = failure },
+            .input_required => |*required| .{ .input_required = required },
         },
+    );
+    defer continuation.deinit(alloc);
+    const continued = requestPromptGetRound(
+        self,
+        alloc,
+        server,
+        snapshot,
+        name,
+        arguments_json,
+        operationDeadline(server),
+        options,
+        continuation.input_responses_json,
+        continuation.request_state_json,
+        round + 1,
+    ) catch |err| {
+        continuation.finish(alloc, .abandoned);
+        return err;
+    };
+    continuation.finish(alloc, .completed);
+    return continued;
+}
+
+const FeatureContinuationRequest = union(enum) {
+    protocol_failure: *const resources_feature.ProtocolError,
+    input_required: *const mrtr.InputRequired,
+};
+
+const FeatureContinuation = struct {
+    completion: tool_mcp_runtime.InputCompletion,
+    input_responses_json: ?[]const u8 = null,
+    request_state_json: ?[]const u8 = null,
+
+    fn deinit(self: *FeatureContinuation, alloc: Allocator) void {
+        if (self.input_responses_json) |responses| alloc.free(responses);
+        self.* = undefined;
+    }
+
+    fn finish(
+        self: FeatureContinuation,
+        alloc: Allocator,
+        terminal: tool_mcp_runtime.ContinuationTerminal,
+    ) void {
+        self.completion.finish(alloc, terminal);
+    }
+};
+
+fn prepareFeatureContinuation(
+    self: Context,
+    alloc: Allocator,
+    server: *McpServer,
+    snapshot: *const FeatureIdentitySnapshot,
+    operation: elicitation.Operation,
+    options: FeatureCallOptions,
+    round: u8,
+    request: FeatureContinuationRequest,
+) !FeatureContinuation {
+    if (round >= 8) return error.McpInputRequiredLimitExceeded;
+
+    switch (request) {
         .protocol_failure => |failure| {
-            if (round >= 8) return error.McpInputRequiredLimitExceeded;
-            if (try respondToLegacyUrlRequired(
+            const handled = try respondToLegacyUrlRequired(
                 self,
                 alloc,
                 server,
                 snapshot,
-                .{ .prompts_get = name },
+                operation,
                 failure.code,
                 failure.data_json,
                 options,
                 round,
-            )) |handled| {
-                if (handled.decision != .retry) {
-                    handled.responder.finish(alloc, handled.origin, .abandoned);
-                    return error.McpInputRequired;
-                }
-                const continued = requestPromptGetRound(
-                    self,
-                    alloc,
-                    server,
-                    snapshot,
-                    name,
-                    arguments_json,
-                    operationDeadline(server),
-                    options,
-                    null,
-                    null,
-                    round + 1,
-                ) catch |err| {
-                    handled.responder.finish(alloc, handled.origin, .abandoned);
-                    return err;
-                };
-                handled.responder.finish(alloc, handled.origin, .completed);
-                return continued;
+            ) orelse {
+                try retainFeatureProtocolDiagnostic(alloc, options, failure.*);
+                return error.McpProtocolError;
+            };
+            if (handled.decision != .retry) {
+                handled.responder.finish(alloc, handled.origin, .abandoned);
+                return error.McpInputRequired;
             }
-            try retainFeatureProtocolDiagnostic(alloc, options, failure);
-            return error.McpProtocolError;
+            return .{ .completion = .{
+                .responder = handled.responder,
+                .origin = handled.origin,
+            } };
         },
-        .input_required => |*required| {
-            if (round >= 8) return error.McpInputRequiredLimitExceeded;
+        .input_required => |required| {
             const responder = options.input_responder orelse return error.McpInputRequired;
             const requests_json = try mrtr.renderRequests(alloc, required.requests);
             defer alloc.free(requests_json);
@@ -800,7 +797,7 @@ fn requestPromptGetRound(
             const origin = tool_mcp_runtime.InputOrigin{
                 .wire = .modern_mcp,
                 .server_name = snapshot.server_name,
-                .operation = .{ .prompts_get = name },
+                .operation = operation,
                 .runtime_generation = self.transport.completions.runtime_generation,
                 .connection_generation = snapshot.connection_generation,
                 .client_generation = snapshot.connection_generation,
@@ -816,26 +813,13 @@ fn requestPromptGetRound(
                 origin,
                 compatibility,
             );
-            defer alloc.free(responses);
+            errdefer alloc.free(responses);
             try mrtr.validateResponses(alloc, required.requests, responses, .{});
-            const continued = requestPromptGetRound(
-                self,
-                alloc,
-                server,
-                snapshot,
-                name,
-                arguments_json,
-                operationDeadline(server),
-                options,
-                responses,
-                required.request_state_json,
-                round + 1,
-            ) catch |err| {
-                responder.finish(alloc, origin, .abandoned);
-                return err;
+            return .{
+                .completion = .{ .responder = responder, .origin = origin },
+                .input_responses_json = responses,
+                .request_state_json = required.request_state_json,
             };
-            responder.finish(alloc, origin, .completed);
-            return continued;
         },
     }
 }
@@ -1193,9 +1177,9 @@ pub fn getPrompt(
         );
         errdefer result.deinit(alloc);
         const server_copy = try alloc.dupe(u8, server.config.name);
-        errdefer alloc.free(server_copy);
+        errdefer mem_utils.free(alloc, server_copy);
         const name_copy = try alloc.dupe(u8, name);
-        errdefer alloc.free(name_copy);
+        errdefer mem_utils.free(alloc, name_copy);
         try operation_access.refreshAndAuthorize(.{ .feature_server = server_name });
         const description = result.description;
         const messages = result.messages;
@@ -1269,7 +1253,7 @@ pub fn completeFeatureArgument(
         var result = try completion_feature.parseResult(alloc, response.body, serverFeatureProtocol(server), .{});
         errdefer result.deinit(alloc);
         const owned_server = try alloc.dupe(u8, server.config.name);
-        errdefer alloc.free(owned_server);
+        errdefer mem_utils.free(alloc, owned_server);
         try operation_access.refreshAndAuthorize(.{ .feature_server = server_name });
         const values = result.values;
         const total = result.total;
@@ -1320,9 +1304,9 @@ pub fn finishFetchedResourceRead(
     fetched_owned = false;
     errdefer result.deinit(alloc);
     const server_copy = try alloc.dupe(u8, server.config.name);
-    errdefer alloc.free(server_copy);
+    errdefer mem_utils.free(alloc, server_copy);
     const uri_copy = try alloc.dupe(u8, uri);
-    errdefer alloc.free(uri_copy);
+    errdefer mem_utils.free(alloc, uri_copy);
     try operation_access.refreshAndAuthorize(access_target);
     const contents = result.contents;
     result.contents = &.{};

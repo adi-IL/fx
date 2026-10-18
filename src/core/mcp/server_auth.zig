@@ -162,6 +162,20 @@ pub fn authenticatedPost(
     retry_policy: AuthRetryPolicy,
     producing_identity: ?*catalog_freshness.Digest,
 ) !streamable_http.PostResponse {
+    if (server.config.acp_server_id) |server_id| {
+        // Host-channel servers carry no HTTP headers or credentials.
+        const carrier = server.message_carrier orelse return error.McpTransportUnavailable;
+        // Every exchange shares the identity of an empty header set, so paged
+        // catalogs from one registration always match.
+        if (producing_identity) |identity| identity.* = try authIdentityForHeaders(request_alloc, &.{});
+        return .{ .body = try carrier.exchange(request_alloc, .{
+            .server_id = server_id,
+            .frame = initial_options.request_body,
+            .control = initial_options.control,
+            .precommit = initial_options.precommit,
+            .max_response_bytes = initial_options.max_response_bytes,
+        }) };
+    }
     var options = initial_options;
     var authorization_attempts: u8 = 0;
     while (true) {
@@ -299,6 +313,7 @@ pub fn refreshSharedCredentials(
     if (source.credentials.refresh_token == null) {
         var auth_message: [512]u8 = undefined;
         server.setFailed(alloc, authRecoveryMessage(&auth_message, "MCP credentials expired.", server.config.name));
+        markReauthenticationRequired(server, source.generation);
         return error.McpAuthenticationRequired;
     }
 
@@ -310,6 +325,7 @@ pub fn refreshSharedCredentials(
         if (err == error.Cancelled or err == error.McpRequestTimedOut) return err;
         var auth_message: [512]u8 = undefined;
         server.setFailed(alloc, authRecoveryMessage(&auth_message, "MCP credential refresh failed.", server.config.name));
+        if (err == error.McpRefreshRejected) markReauthenticationRequired(server, source.generation);
         return err;
     };
     var transferred = false;
@@ -338,12 +354,28 @@ pub fn refreshSharedCredentials(
 }
 
 pub fn authRecoveryMessage(buffer: []u8, reason: []const u8, name: []const u8) []const u8 {
-    return std.fmt.bufPrint(buffer, "{s} Run /mcp auth {s} --open.", .{ reason, name }) catch reason;
+    return std.mem.print(buffer, "{s} Run /mcp auth {s} --open.", .{ reason, name }) catch reason;
+}
+
+/// Marks a server whose stored credentials can no longer be used (refresh
+/// rejected with invalid_grant, or expired with no refresh token) as needing
+/// interactive re-authentication. The challenge flag flips every surface to
+/// needs_auth via serverAuthenticationState, and the credentials flag stops
+/// claiming a usable token. The dead credentials stay installed until a
+/// successful re-auth or refresh replaces them; a fresh challenge is
+/// re-discovered at auth time. A generation that moved since the refresh
+/// started means newer credentials already landed, so the mark is skipped.
+fn markReauthenticationRequired(server: *McpServer, expected_generation: u64) void {
+    server.auth_lock.lockUncancelable(io_mod.getIo());
+    defer server.auth_lock.unlock(io_mod.getIo());
+    if (server.auth_generation.load(.acquire) != expected_generation) return;
+    advanceAuthGeneration(server);
+    server.auth_challenge_present.store(true, .release);
+    server.auth_credentials_present.store(false, .release);
 }
 
 pub fn markAuthenticationRequired(alloc: Allocator, server: *McpServer) void {
-    const message = std.fmt.allocPrint(
-        alloc,
+    const message = alloc.print(
         "Authentication required. Run /mcp auth {s} --open, or configure bearer_token_env.",
         .{server.config.name},
     ) catch {
@@ -408,6 +440,7 @@ pub fn authorizeForChallenge(
             .client_secret = client_secret,
             .client_metadata_url = auth_config.client_metadata_url,
             .scopes = auth_config.scopes,
+            .scopes_configured = auth_config.scopes_configured,
         },
         .previous_scope = source.previous_scope,
     })) {
@@ -496,6 +529,9 @@ fn replaceAuthCredentials(alloc: Allocator, server: *McpServer, credentials: *mc
     if (server.auth_credentials) |*old| old.deinit(alloc);
     server.auth_credentials = credentials.*;
     server.auth_credentials_present.store(true, .release);
+    // Usable credentials settle any challenge state left by a rejected
+    // refresh; the interactive auth path clears the pending challenge object.
+    server.auth_challenge_present.store(false, .release);
     credentials.* = undefined;
 }
 
@@ -685,6 +721,8 @@ pub fn authenticate(
     };
     defer source.challenge.deinit(alloc);
     defer if (source.previous_scope) |value| alloc.free(value);
+    var completion: mcp_auth.InteractiveCompletion = .{};
+    defer completion.finish(false);
     var credentials = switch (try mcp_auth.authorizeInteractive(alloc, .{
         .endpoint = try server.config.remoteUrl(),
         .challenge = source.challenge,
@@ -695,6 +733,7 @@ pub fn authenticate(
             .client_secret = client_secret,
             .client_metadata_url = auth_config.client_metadata_url,
             .scopes = auth_config.scopes,
+            .scopes_configured = auth_config.scopes_configured,
             .callback_port = auth_config.callback_port,
         },
         .previous_scope = source.previous_scope,
@@ -702,6 +741,7 @@ pub fn authenticate(
         .open_url = open_url,
         .cancel_flag = cancel_flag,
         .lifecycle_cancel_flag = server.cancellation(),
+        .completion = &completion,
     })) {
         .credentials => |credentials| credentials,
         .issuer_mismatch => |mismatch| return .{ .issuer_mismatch = mismatch },
@@ -729,6 +769,7 @@ pub fn authenticate(
         server.pending_auth_challenge = null;
         server.auth_challenge_present.store(false, .release);
     }
+    completion.finish(true);
     return .{ .authenticated = .{ .repaired_entries = repaired_entries } };
 }
 
@@ -986,4 +1027,36 @@ pub fn logout(alloc: Allocator, catalog_mutex: *std.Io.RwLock, completions: *leg
         .revocation_failed = revocation_failed,
         .repaired_entries = deleted.repaired_entries,
     };
+}
+
+test "rejected credentials mark re-authentication required" {
+    const alloc = std.testing.allocator;
+    var server = McpServer{ .config = .{ .name = try alloc.dupe(u8, "datadog") } };
+    defer server.deinit(alloc);
+    server.auth_credentials_present.store(true, .release);
+    const generation_before = server.auth_generation.load(.acquire);
+
+    markReauthenticationRequired(&server, generation_before);
+
+    try std.testing.expect(server.auth_challenge_present.load(.acquire));
+    try std.testing.expect(!server.auth_credentials_present.load(.acquire));
+    try std.testing.expect(server.auth_generation.load(.acquire) > generation_before);
+    try std.testing.expectEqual(
+        @import("health.zig").AuthenticationState.required,
+        @import("server_views.zig").serverAuthenticationState(&server),
+    );
+}
+
+test "a newer auth generation suppresses a stale re-authentication mark" {
+    const alloc = std.testing.allocator;
+    var server = McpServer{ .config = .{ .name = try alloc.dupe(u8, "datadog") } };
+    defer server.deinit(alloc);
+    server.auth_credentials_present.store(true, .release);
+    const generation_before = server.auth_generation.load(.acquire);
+    advanceAuthGeneration(&server);
+
+    markReauthenticationRequired(&server, generation_before);
+
+    try std.testing.expect(!server.auth_challenge_present.load(.acquire));
+    try std.testing.expect(server.auth_credentials_present.load(.acquire));
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_allocator = @import("../shared/testing_allocator.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const io_mod = @import("../shared/io.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -236,6 +237,15 @@ pub fn prepareReadyCall(alloc: Allocator, call: ToolCall, config: Config) !Resul
                     .model_output = @constCast(reason),
                 } };
             },
+            .not_file_mutation => {
+                // A host tool reuses a reserved file-mutation name; it belongs
+                // to ordinary registered-tool dispatch, not the builtin
+                // mutation contract.
+                break :blk switch (try prepareRegisteredApplicableTargets(alloc, config.workspace_root, config.access_scope, call, tool.*)) {
+                    .prepared => |prepared| prepared,
+                    .legacy_candidate => return .{ .candidate = .{ .kind = .legacy_target_resolution } },
+                };
+            },
             .prepared => |*prepared| {
                 defer prepared.deinit(alloc);
                 break :blk try dupeSingleApplicableTarget(alloc, prepared.targetPath(), .file);
@@ -329,6 +339,12 @@ fn prepareRegisteredApplicableTargets(
             .directory,
         ) };
     }
+
+    // Host tools own their effects; the kernel has no typed target contract
+    // for them. Skipping permission-target projection keeps a host tool that
+    // reuses a reserved name (e.g. write_file) out of the builtin mutation
+    // path entirely.
+    if (tool.executor_kind == .host) return .{ .prepared = @constCast(&.{}) };
 
     var permission_targets = permissions.permissionTargetsForCallInScope(
         alloc,
@@ -604,7 +620,7 @@ const RetainedTargetCollector = struct {
             debug_trace.logf("context", "retained_target_skipped reason=outside_primary_workspace", .{});
             return;
         }
-        const directory = if (is_directory) resolved else std.fs.path.dirname(resolved) orelse return;
+        const directory = if (is_directory) resolved else std.Io.Dir.path.dirname(resolved) orelse return;
         for (self.targets.items) |target| {
             if (std.mem.eql(u8, target.path, directory)) return;
         }
@@ -654,7 +670,7 @@ test "retained context targets use bounded typed history without executing calls
         .execution = .{ .tool_steps = @constCast(&steps) },
     } }};
     try checkRetainedTargetsAllocations(alloc, &history, workspace, registry);
-    try std.testing.checkAllAllocationFailures(alloc, checkRetainedTargetsAllocations, .{ &history, workspace, registry });
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, checkRetainedTargetsAllocations, .{ &history, workspace, registry });
     var cancelled = std.atomic.Value(bool).init(true);
     try std.testing.expectError(error.Cancelled, retainedContextTargets(alloc, &history, null, workspace, registry, &cancelled));
 
@@ -867,7 +883,7 @@ test "registered candidates expose only authoritative canonical targets" {
         "workspace/segment::scope",
     );
     defer alloc.free(delimiter_cwd_path);
-    const new_path = try std.fs.path.join(alloc, &.{ workspace, "build/pkg/new.txt" });
+    const new_path = try std.Io.Dir.path.join(alloc, &.{ workspace, "build/pkg/new.txt" });
     defer alloc.free(new_path);
     const tools = [_]tool_dispatch.Tool{
         builtin_tools.read_file,
@@ -1130,7 +1146,7 @@ test "preparation cancellation and allocation failures clean owned state" {
     const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(workspace);
     try std.testing.checkAllAllocationFailures(
-        alloc,
+        testing_allocator.no_resize,
         checkPreparationAllocationFailures,
         .{workspace},
     );
